@@ -13,6 +13,13 @@ Saya tidak bertanggung jawab atas penggunaan aplikasi ini untuk aktivitas yang m
 ## Preview
 ![FamilyCam WebRTC-rs PoC UI](docs/images/webrtc-rs-poc-ui-preview.jpeg)
 
+## Diagram Arsitektur
+- Alur data kamera ke end-user ada di [docs/DATAFLOW.md](/home/iwan/Project/family-cam-on-demand-home-monitor/docs/DATAFLOW.md)
+- Main app flow:
+  ![Main App Data Flow](docs/images/main-app-dataflow.svg)
+- WebRTC PoC flow:
+  ![WebRTC PoC Data Flow](docs/images/webrtc-poc-dataflow.svg)
+
 ## Tech Stack (Ringkas)
 - Bahasa utama: Rust
 - Backend web: `axum`, `tokio`
@@ -35,6 +42,12 @@ Jalankan:
 ```bash
 cd projects/main-app
 cargo run
+```
+
+Troubleshooting kamera cepat:
+```bash
+cd /home/iwan/Project/family-cam-on-demand-home-monitor
+scripts/check-camera.sh
 ```
 
 ## 2) WebRTC Experiment (PoC)

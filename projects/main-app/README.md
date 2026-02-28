@@ -104,6 +104,24 @@ Content-Type: application/json
 }
 ```
 
+## Troubleshooting Kamera
+Untuk diagnosa cepat masalah kamera (permission, device busy, service/port):
+
+```bash
+cd /home/iwan/Project/family-cam-on-demand-home-monitor
+scripts/check-camera.sh
+```
+
+Pilihan tambahan:
+
+```bash
+# cek device tertentu
+scripts/check-camera.sh --device /dev/video1
+
+# skip test ffmpeg satu frame
+scripts/check-camera.sh --no-ffmpeg-test
+```
+
 ## Endpoint Utama
 - `GET /health`
 - `POST /login`

@@ -16,6 +16,7 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
+use ice::{mdns::MulticastDnsMode, network_type::NetworkType};
 use interceptor::registry::Registry;
 use rtp::packet::Packet;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ use webrtc::{
     api::{
         interceptor_registry::register_default_interceptors, media_engine::MediaEngine, APIBuilder,
     },
-    ice_transport::ice_candidate::RTCIceCandidateInit,
+    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
     peer_connection::{
         configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
         sdp::session_description::RTCSessionDescription, RTCPeerConnection,
@@ -46,9 +47,16 @@ use webrtc::{
 #[derive(Clone)]
 struct AppConfig {
     bind_addr: SocketAddr,
-    max_viewers: usize,
+    max_sessions: usize,
     ttl_secs: u64,
+    auto_stop_no_viewers_secs: u64,
+    max_stream_secs: u64,
     owner_token: String,
+    ice_servers: Vec<String>,
+    ice_udp4_only: bool,
+    ice_disconnected_timeout_secs: u64,
+    ice_failed_timeout_secs: u64,
+    ice_keepalive_interval_secs: u64,
     rtp_listen_addr: SocketAddr,
     video_mime_type: String,
     video_clock_rate: u32,
@@ -63,16 +71,49 @@ impl AppConfig {
             .unwrap_or_else(|_| "0.0.0.0:9080".to_string())
             .parse()
             .context("invalid POC_BIND_ADDR")?;
-        let max_viewers = env::var("POC_MAX_VIEWERS")
+        let max_sessions = env::var("POC_MAX_SESSIONS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
+            .or_else(|| {
+                env::var("POC_MAX_VIEWERS")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+            })
             .unwrap_or(3);
         let ttl_secs = env::var("POC_SESSION_TTL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(600);
+        let auto_stop_no_viewers_secs = env::var("POC_AUTO_STOP_NO_VIEWERS_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20);
+        let max_stream_secs = env::var("POC_MAX_STREAM_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1800);
         let owner_token =
             env::var("POC_OWNER_TOKEN").unwrap_or_else(|_| "owner-dev-token".to_string());
+        let ice_servers = env::var("POC_ICE_SERVERS")
+            .unwrap_or_else(|_| "stun:stun.l.google.com:19302".to_string())
+            .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let ice_udp4_only = parse_env_bool("POC_ICE_UDP4_ONLY", true);
+        let ice_disconnected_timeout_secs = env::var("POC_ICE_DISCONNECTED_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(12);
+        let ice_failed_timeout_secs = env::var("POC_ICE_FAILED_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(45);
+        let ice_keepalive_interval_secs = env::var("POC_ICE_KEEPALIVE_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2);
         let rtp_listen_addr = env::var("POC_RTP_LISTEN_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:5004".to_string())
             .parse()
@@ -88,7 +129,7 @@ impl AppConfig {
         });
         let publisher_bin = env::var("POC_PUBLISHER_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
         let publisher_default_args = format!(
-            "-f lavfi -i testsrc=size=640x360:rate=10 -an -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -f rtp rtp://{}",
+            "-f lavfi -i testsrc=size=640x360:rate=10 -an -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -profile:v baseline -level 3.1 -g 30 -keyint_min 30 -sc_threshold 0 -f rtp rtp://{}",
             rtp_listen_addr
         );
         let publisher_args = env::var("POC_PUBLISHER_ARGS")
@@ -99,9 +140,16 @@ impl AppConfig {
 
         Ok(Self {
             bind_addr,
-            max_viewers,
+            max_sessions,
             ttl_secs,
+            auto_stop_no_viewers_secs,
+            max_stream_secs,
             owner_token,
+            ice_servers,
+            ice_udp4_only,
+            ice_disconnected_timeout_secs,
+            ice_failed_timeout_secs,
+            ice_keepalive_interval_secs,
             rtp_listen_addr,
             video_mime_type,
             video_clock_rate,
@@ -115,6 +163,8 @@ impl AppConfig {
 #[derive(Clone)]
 struct AppState {
     config: AppConfig,
+    started_unix: u64,
+    started_instant: Instant,
     webrtc_api: Arc<webrtc::api::API>,
     video_track: Arc<TrackLocalStaticRTP>,
     sessions: Arc<RwLock<HashMap<Uuid, SessionEntry>>>,
@@ -128,7 +178,7 @@ struct SessionEntry {
     last_seen: Instant,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct IngestStats {
     packets: u64,
     bytes: u64,
@@ -279,7 +329,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = AppConfig::from_env()?;
-    let webrtc_api = Arc::new(build_webrtc_api()?);
+    let webrtc_api = Arc::new(build_webrtc_api(&config)?);
     let video_track = Arc::new(TrackLocalStaticRTP::new(
         RTCRtpCodecCapability {
             mime_type: config.video_mime_type.clone(),
@@ -294,6 +344,8 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         config: config.clone(),
+        started_unix: now_unix(),
+        started_instant: Instant::now(),
         webrtc_api,
         video_track,
         sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -302,10 +354,12 @@ async fn main() -> Result<()> {
     };
     spawn_cleanup_task(state.clone());
     spawn_rtp_ingest_task(state.clone());
+    spawn_publisher_guard_task(state.clone());
 
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics))
         .route("/webrtc/offer", post(webrtc_offer))
         .route("/webrtc/candidate", post(webrtc_candidate))
         .route("/webrtc/sessions", get(webrtc_sessions))
@@ -325,14 +379,26 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_webrtc_api() -> Result<webrtc::api::API> {
+fn build_webrtc_api(config: &AppConfig) -> Result<webrtc::api::API> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
 
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut media_engine)?;
 
+    let mut setting_engine = webrtc::api::setting_engine::SettingEngine::default();
+    setting_engine.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+    if config.ice_udp4_only {
+        setting_engine.set_network_types(vec![NetworkType::Udp4]);
+    }
+    setting_engine.set_ice_timeouts(
+        Some(Duration::from_secs(config.ice_disconnected_timeout_secs)),
+        Some(Duration::from_secs(config.ice_failed_timeout_secs)),
+        Some(Duration::from_secs(config.ice_keepalive_interval_secs)),
+    );
+
     Ok(APIBuilder::new()
+        .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .build())
@@ -451,58 +517,15 @@ async fn publisher_stop(
     axum::extract::Query(query): axum::extract::Query<OwnerQuery>,
 ) -> Result<Json<PublisherStatusResponse>, ApiError> {
     ensure_owner(&state, &query.token)?;
-
-    let mut process = {
-        let mut publisher = state.publisher.lock().await;
-        refresh_publisher_state_locked(&mut publisher);
-        publisher.running.take()
-    };
-
-    let Some(mut process) = process.take() else {
+    if !stop_publisher_process(&state, "owner request").await? {
         return Err(ApiError::Conflict(
             "publisher tidak sedang berjalan".to_string(),
         ));
-    };
-
-    let pid = process.pid;
-    if let Err(err) = process.child.start_kill() {
-        warn!("publisher start_kill failed for pid={pid:?}: {err}");
     }
 
-    let wait_result = timeout(Duration::from_secs(5), process.child.wait()).await;
-    let exit_info = match wait_result {
-        Ok(Ok(status)) => PublisherExitInfo {
-            exited_unix: now_unix(),
-            code: status.code(),
-            success: status.success(),
-        },
-        Ok(Err(err)) => {
-            return Err(ApiError::Internal(format!(
-                "gagal menunggu publisher stop: {err}"
-            )));
-        }
-        Err(_) => {
-            let _ = process.child.kill().await;
-            let status = process
-                .child
-                .wait()
-                .await
-                .map_err(|e| ApiError::Internal(format!("force kill publisher gagal: {e}")))?;
-            PublisherExitInfo {
-                exited_unix: now_unix(),
-                code: status.code(),
-                success: status.success(),
-            }
-        }
-    };
-
-    {
-        let mut publisher = state.publisher.lock().await;
-        publisher.last_exit = Some(exit_info);
-        refresh_publisher_state_locked(&mut publisher);
-        info!("publisher stopped pid={pid:?}");
-        Ok(Json(publisher_status_response(&publisher)))
-    }
+    let mut publisher = state.publisher.lock().await;
+    refresh_publisher_state_locked(&mut publisher);
+    Ok(Json(publisher_status_response(&publisher)))
 }
 
 async fn camera_probe(
@@ -610,7 +633,15 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "sessions": current,
-        "max_viewers": state.config.max_viewers,
+        "max_sessions": state.config.max_sessions,
+        "max_viewers": state.config.max_sessions,
+        "auto_stop_no_viewers_secs": state.config.auto_stop_no_viewers_secs,
+        "max_stream_secs": state.config.max_stream_secs,
+        "ice_servers": state.config.ice_servers,
+        "ice_udp4_only": state.config.ice_udp4_only,
+        "ice_disconnected_timeout_secs": state.config.ice_disconnected_timeout_secs,
+        "ice_failed_timeout_secs": state.config.ice_failed_timeout_secs,
+        "ice_keepalive_interval_secs": state.config.ice_keepalive_interval_secs,
         "publisher_running": publisher_running,
         "publisher_pid": publisher_pid,
         "rtp_listen": state.config.rtp_listen_addr.to_string(),
@@ -624,15 +655,66 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+async fn metrics(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let sessions_count = state.sessions.read().await.len();
+    let ingest = state.ingest_stats.lock().await.clone();
+    let publisher_status = {
+        let mut publisher = state.publisher.lock().await;
+        refresh_publisher_state_locked(&mut publisher);
+        publisher_status_response(&publisher)
+    };
+    let process = collect_process_metrics().await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "app_started_unix": state.started_unix,
+        "app_uptime_secs": state.started_instant.elapsed().as_secs(),
+        "sessions": {
+            "current": sessions_count,
+            "max": state.config.max_sessions
+        },
+        "config": {
+            "ice_servers": state.config.ice_servers,
+            "ice_udp4_only": state.config.ice_udp4_only,
+            "ice_disconnected_timeout_secs": state.config.ice_disconnected_timeout_secs,
+            "ice_failed_timeout_secs": state.config.ice_failed_timeout_secs,
+            "ice_keepalive_interval_secs": state.config.ice_keepalive_interval_secs,
+            "rtp_listen": state.config.rtp_listen_addr.to_string(),
+            "max_stream_secs": state.config.max_stream_secs,
+            "auto_stop_no_viewers_secs": state.config.auto_stop_no_viewers_secs
+        },
+        "publisher": publisher_status,
+        "ingest": {
+            "rtp_packets": ingest.packets,
+            "rtp_bytes": ingest.bytes,
+            "rtp_parse_errors": ingest.parse_errors,
+            "rtp_write_errors": ingest.write_errors,
+            "rtp_last_packet_unix": ingest.last_packet_unix,
+            "rtp_last_source": ingest.last_source,
+        },
+        "process": process
+    }))
+}
+
 async fn webrtc_offer(
     State(state): State<AppState>,
     Json(req): Json<OfferRequest>,
 ) -> Result<Json<OfferResponse>, ApiError> {
     let session_id = Uuid::new_v4();
+    let rtc_config = if state.config.ice_servers.is_empty() {
+        RTCConfiguration::default()
+    } else {
+        RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: state.config.ice_servers.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    };
     let peer = Arc::new(
         state
             .webrtc_api
-            .new_peer_connection(RTCConfiguration::default())
+            .new_peer_connection(rtc_config)
             .await
             .map_err(|e| ApiError::Internal(format!("create peer connection failed: {e}")))?,
     );
@@ -740,7 +822,7 @@ async fn webrtc_sessions(
     };
     Ok(Json(SessionsResponse {
         count: sessions.len(),
-        max: state.config.max_viewers,
+        max: state.config.max_sessions,
         sessions,
     }))
 }
@@ -770,11 +852,11 @@ async fn insert_session(
     peer: Arc<RTCPeerConnection>,
 ) -> Result<(), ApiError> {
     let mut guard = state.sessions.write().await;
-    if guard.len() >= state.config.max_viewers {
+    if guard.len() >= state.config.max_sessions {
         let _ = peer.close().await;
         return Err(ApiError::Conflict(format!(
             "viewer penuh: maksimal {}",
-            state.config.max_viewers
+            state.config.max_sessions
         )));
     }
     let now = Instant::now();
@@ -866,6 +948,67 @@ fn spawn_cleanup_task(state: AppState) {
     });
 }
 
+fn spawn_publisher_guard_task(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(5));
+        let mut no_viewers_since: Option<Instant> = None;
+        loop {
+            ticker.tick().await;
+            let viewer_count = state.sessions.read().await.len();
+            let now = Instant::now();
+
+            if viewer_count == 0 {
+                if no_viewers_since.is_none() {
+                    no_viewers_since = Some(now);
+                }
+            } else {
+                no_viewers_since = None;
+            }
+
+            let mut stop_reason: Option<String> = None;
+            {
+                let mut publisher = state.publisher.lock().await;
+                refresh_publisher_state_locked(&mut publisher);
+                if let Some(process) = publisher.running.as_ref() {
+                    if state.config.max_stream_secs > 0 {
+                        let run_secs = now_unix().saturating_sub(process.started_unix);
+                        if run_secs >= state.config.max_stream_secs {
+                            stop_reason = Some(format!(
+                                "auto-stop: max stream duration reached ({}s >= {}s)",
+                                run_secs, state.config.max_stream_secs
+                            ));
+                        }
+                    }
+
+                    if stop_reason.is_none()
+                        && state.config.auto_stop_no_viewers_secs > 0
+                        && viewer_count == 0
+                    {
+                        if let Some(since) = no_viewers_since {
+                            let idle_secs = now.duration_since(since).as_secs();
+                            if idle_secs >= state.config.auto_stop_no_viewers_secs {
+                                stop_reason =
+                                    Some(format!("auto-stop: no viewers for {}s", idle_secs));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(reason) = stop_reason {
+                match stop_publisher_process(&state, &reason).await {
+                    Ok(true) => {
+                        info!("{reason}");
+                        no_viewers_since = None;
+                    }
+                    Ok(false) => {}
+                    Err(err) => warn!("publisher guard stop failed: {err:?}"),
+                }
+            }
+        }
+    });
+}
+
 fn spawn_rtp_ingest_task(state: AppState) {
     tokio::spawn(async move {
         loop {
@@ -919,11 +1062,130 @@ async fn run_rtp_ingest_loop(state: AppState) -> Result<()> {
     }
 }
 
+async fn stop_publisher_process(state: &AppState, reason: &str) -> Result<bool, ApiError> {
+    let mut process = {
+        let mut publisher = state.publisher.lock().await;
+        refresh_publisher_state_locked(&mut publisher);
+        publisher.running.take()
+    };
+
+    let Some(mut process) = process.take() else {
+        return Ok(false);
+    };
+
+    let pid = process.pid;
+    if let Err(err) = process.child.start_kill() {
+        warn!("publisher start_kill failed for pid={pid:?}: {err}");
+    }
+
+    let wait_result = timeout(Duration::from_secs(5), process.child.wait()).await;
+    let exit_info = match wait_result {
+        Ok(Ok(status)) => PublisherExitInfo {
+            exited_unix: now_unix(),
+            code: status.code(),
+            success: status.success(),
+        },
+        Ok(Err(err)) => {
+            return Err(ApiError::Internal(format!(
+                "gagal menunggu publisher stop: {err}"
+            )));
+        }
+        Err(_) => {
+            let _ = process.child.kill().await;
+            let status = process
+                .child
+                .wait()
+                .await
+                .map_err(|e| ApiError::Internal(format!("force kill publisher gagal: {e}")))?;
+            PublisherExitInfo {
+                exited_unix: now_unix(),
+                code: status.code(),
+                success: status.success(),
+            }
+        }
+    };
+
+    let mut publisher = state.publisher.lock().await;
+    publisher.last_exit = Some(exit_info);
+    refresh_publisher_state_locked(&mut publisher);
+    info!("publisher stopped pid={pid:?} reason={reason}");
+    Ok(true)
+}
+
+async fn collect_process_metrics() -> serde_json::Value {
+    let mut rss_kb: Option<u64> = None;
+    let mut thread_count: Option<u64> = None;
+    if let Ok(status) = tokio::fs::read_to_string("/proc/self/status").await {
+        for line in status.lines() {
+            if let Some(value) = line.strip_prefix("VmRSS:") {
+                rss_kb = value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok());
+            } else if let Some(value) = line.strip_prefix("Threads:") {
+                thread_count = value.trim().parse::<u64>().ok();
+            }
+        }
+    }
+
+    let mut cpu_user_ticks: Option<u64> = None;
+    let mut cpu_system_ticks: Option<u64> = None;
+    if let Ok(stat) = tokio::fs::read_to_string("/proc/self/stat").await {
+        if let Some(end_comm) = stat.rfind(") ") {
+            let rest = &stat[end_comm + 2..];
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() > 12 {
+                cpu_user_ticks = parts.get(11).and_then(|v| v.parse::<u64>().ok());
+                cpu_system_ticks = parts.get(12).and_then(|v| v.parse::<u64>().ok());
+            }
+        }
+    }
+    let cpu_total_ticks = match (cpu_user_ticks, cpu_system_ticks) {
+        (Some(u), Some(s)) => Some(u.saturating_add(s)),
+        _ => None,
+    };
+
+    let mut open_fds: u64 = 0;
+    if let Ok(mut dir) = tokio::fs::read_dir("/proc/self/fd").await {
+        loop {
+            match dir.next_entry().await {
+                Ok(Some(_)) => open_fds = open_fds.saturating_add(1),
+                Ok(None) => break,
+                Err(_) => {
+                    open_fds = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    serde_json::json!({
+        "pid": std::process::id(),
+        "rss_kb": rss_kb,
+        "threads": thread_count,
+        "open_fds": open_fds,
+        "cpu_user_ticks": cpu_user_ticks,
+        "cpu_system_ticks": cpu_system_ticks,
+        "cpu_total_ticks": cpu_total_ticks
+    })
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn parse_env_bool(key: &str, default: bool) -> bool {
+    match env::var(key) {
+        Ok(raw) => {
+            let v = raw.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+                || (!matches!(v.as_str(), "0" | "false" | "no" | "off") && default)
+        }
+        Err(_) => default,
+    }
 }
 
 const INDEX_HTML: &str = r#"<!doctype html>
@@ -1099,8 +1361,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
             </select>
           </div>
           <div class="row">
-            <input id="cameraFps" type="text" placeholder="FPS (contoh 15)" />
-            <input id="cameraSize" type="text" placeholder="Resolusi (contoh 640x480)" />
+            <select id="cameraFps">
+              <option value="">FPS auto</option>
+              <option value="5">5 fps</option>
+              <option value="10">10 fps</option>
+              <option value="15">15 fps</option>
+              <option value="20">20 fps</option>
+              <option value="24">24 fps</option>
+              <option value="30">30 fps</option>
+            </select>
+            <select id="cameraSize">
+              <option value="">Resolusi auto</option>
+              <option value="320x240">320x240</option>
+              <option value="640x360">640x360</option>
+              <option value="640x480">640x480</option>
+              <option value="848x480">848x480</option>
+              <option value="960x540">960x540</option>
+              <option value="1280x720">1280x720</option>
+            </select>
           </div>
           <div class="row">
             <button id="startWebcam" class="primary">Start Webcam</button>
@@ -1118,6 +1396,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       let lastPublisherSummary = "";
       const uiState = {
         rtpListen: "127.0.0.1:5004",
+        iceServers: ["stun:stun.l.google.com:19302"],
         cameraFormatsByPath: new Map(),
         preferredCameraDevice: "",
         preferredCameraFormat: "__auto__",
@@ -1166,12 +1445,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
         }
       }
 
+      function setSelectValueIfExists(selectEl, value) {
+        if (!selectEl) return;
+        const stringValue = value == null ? "" : String(value);
+        const exists = Array.from(selectEl.options).some((opt) => opt.value === stringValue);
+        selectEl.value = exists ? stringValue : "";
+      }
+
       function restoreUiPreferences() {
         const data = loadUiPreferences();
         if (!data) return;
         if (typeof data.ownerToken === "string") elOwnerToken.value = data.ownerToken;
-        if (typeof data.cameraFps === "string") elCameraFps.value = data.cameraFps;
-        if (typeof data.cameraSize === "string") elCameraSize.value = data.cameraSize;
+        if (typeof data.cameraFps === "string") setSelectValueIfExists(elCameraFps, data.cameraFps);
+        if (typeof data.cameraSize === "string") setSelectValueIfExists(elCameraSize, data.cameraSize);
         if (typeof data.cameraDevice === "string") uiState.preferredCameraDevice = data.cameraDevice;
         if (typeof data.cameraFormat === "string") uiState.preferredCameraFormat = data.cameraFormat;
       }
@@ -1183,8 +1469,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
           // ignore storage errors
         }
         elOwnerToken.value = "";
-        elCameraFps.value = "";
-        elCameraSize.value = "";
+        setSelectValueIfExists(elCameraFps, "");
+        setSelectValueIfExists(elCameraSize, "");
         uiState.preferredCameraDevice = "";
         uiState.preferredCameraFormat = "__auto__";
         uiState.cameraFormatsByPath.clear();
@@ -1235,8 +1521,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
             uiState.rtpListen = data.rtp_listen;
             elRtpListen.textContent = data.rtp_listen;
           }
+          if (resp.ok && Array.isArray(data.ice_servers)) {
+            uiState.iceServers = data.ice_servers.filter((v) => typeof v === "string" && v.trim().length > 0);
+          }
           if (!silent) {
-            log(`health ok rtp=${uiState.rtpListen}`);
+            log(`health ok rtp=${uiState.rtpListen} ice=${uiState.iceServers.join(",") || "-"}`);
           }
         } catch (_) {
           if (!silent) {
@@ -1370,7 +1659,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
               "-c:v", "libx264",
               "-preset", "ultrafast",
               "-tune", "zerolatency",
-              "-pix_fmt", "yuv420p"
+              "-pix_fmt", "yuv420p",
+              "-profile:v", "baseline",
+              "-level", "3.1",
+              "-g", "30",
+              "-keyint_min", "30",
+              "-sc_threshold", "0"
             );
           }
           args.push("-f", "rtp", `rtp://${uiState.rtpListen}`);
@@ -1405,7 +1699,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
       async function connect() {
         if (pc) return;
-        pc = new RTCPeerConnection();
+        const iceServers = (uiState.iceServers || []).map((url) => ({ urls: url }));
+        pc = iceServers.length > 0
+          ? new RTCPeerConnection({ iceServers })
+          : new RTCPeerConnection();
+        log(`connect using ICE servers: ${iceServers.map((s) => s.urls).join(",") || "(none)"}`);
         pc.addTransceiver("video", { direction: "recvonly" });
         pc.ontrack = (ev) => {
           if (ev.streams && ev.streams[0]) {
@@ -1482,8 +1780,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         saveUiPreferences();
       });
       elCameraFormat.addEventListener("change", saveUiPreferences);
-      elCameraFps.addEventListener("input", saveUiPreferences);
-      elCameraSize.addEventListener("input", saveUiPreferences);
+      elCameraFps.addEventListener("change", saveUiPreferences);
+      elCameraSize.addEventListener("change", saveUiPreferences);
       elOwnerToken.addEventListener("input", saveUiPreferences);
       elOwnerToken.addEventListener("change", pollPublisherStatus);
       elOwnerToken.addEventListener("blur", pollPublisherStatus);

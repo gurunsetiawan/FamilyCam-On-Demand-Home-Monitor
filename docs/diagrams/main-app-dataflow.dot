@@ -1,0 +1,19 @@
+digraph MainAppDataflow {
+  rankdir=LR;
+  graph [fontname="Arial", bgcolor="white", pad="0.2"];
+  node [shape=box, style="rounded,filled", color="#334155", fillcolor="#EFF6FF", fontname="Arial", fontsize=11];
+  edge [color="#334155", penwidth=1.2];
+
+  camera [label="USB Camera\n/dev/video0"];
+  ffmpeg [label="ffmpeg capture\nprocess"];
+  frames [label="JPEG frames"];
+  app [label="FamilyCam main-app\n(axum server)"];
+  stream [label="HTTP MJPEG\n/stream"];
+  browser [label="Browser\nEnd User"];
+
+  camera -> ffmpeg;
+  ffmpeg -> frames;
+  frames -> app;
+  app -> stream;
+  stream -> browser;
+}

@@ -1,0 +1,25 @@
+digraph WebRTCPocDataflow {
+  rankdir=LR;
+  graph [fontname="Arial", bgcolor="white", pad="0.2"];
+  node [shape=box, style="rounded,filled", color="#334155", fillcolor="#ECFDF5", fontname="Arial", fontsize=11];
+  edge [color="#334155", penwidth=1.2];
+
+  camera [label="USB Camera\n/dev/video0"];
+  publisher [label="ffmpeg publisher\n(v4l2 + H264 encode)"];
+  rtp [label="RTP UDP\n127.0.0.1:5004"];
+  ingest [label="webrtc-rs server\nRTP ingest loop"];
+  track [label="TrackLocalStaticRTP"];
+  pc [label="PeerConnection\n(DTLS/SRTP)"];
+  browser [label="Browser\nEnd User"];
+
+  stun [label="STUN Server\n(ICE assistance)", fillcolor="#FEF3C7"];
+
+  camera -> publisher;
+  publisher -> rtp;
+  rtp -> ingest;
+  ingest -> track;
+  track -> pc;
+  pc -> browser;
+  pc -> stun [style=dashed, label="ICE"];
+  browser -> stun [style=dashed, label="ICE"];
+}

@@ -8,6 +8,7 @@ anyhow = "1"
 axum = { version = "0.7", features = ["macros", "json"] }
 bytes = "1"
 dotenvy = "0.15"
+ice = { package = "webrtc-ice", version = "0.12" }
 interceptor = "0.13"
 rtp = "0.12"
 serde = { version = "1", features = ["derive"] }

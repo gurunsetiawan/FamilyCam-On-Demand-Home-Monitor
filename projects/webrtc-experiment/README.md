@@ -14,6 +14,9 @@ Folder ini berisi prototype eksperimen WebRTC untuk FamilyCam.
 - RTP ingest dari ffmpeg ke WebRTC track
 - control publisher ffmpeg (`/publisher/start|stop|status`)
 - camera probe (`/camera/probe`)
+- hard limit session viewer + TTL cleanup
+- auto-stop publisher saat tidak ada viewer & saat melewati durasi maksimum
+- runtime metrics endpoint (`/metrics`)
 - UI dashboard 2 kolom + auto refresh status
 - simpan setting UI di browser (`localStorage`) + clear button
 
