@@ -1,0 +1,32 @@
+[Unit]
+Description=FamilyCam On-Demand Camera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orangepi
+Group=video
+WorkingDirectory=/opt/familycam
+EnvironmentFile=/opt/familycam/.env
+ExecStart=/opt/familycam/target/release/family-cam-on-demand-home-monitor
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryMax=200M
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

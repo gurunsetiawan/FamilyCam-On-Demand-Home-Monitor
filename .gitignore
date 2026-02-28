@@ -1,0 +1,10 @@
+/projects/main-app/target
+/projects/main-app/.env
+/projects/main-app/logs/*
+!/projects/main-app/logs/.gitkeep
+/projects/main-app/snapshots/*
+!/projects/main-app/snapshots/.gitkeep
+/projects/webrtc-experiment/webrtc-rs-poc/target
+/projects/webrtc-experiment/webrtc-rs-poc/.env
+/projects/main-app/plan*.md
+/private-notes/
