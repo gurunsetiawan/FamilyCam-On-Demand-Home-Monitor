@@ -6,8 +6,6 @@ Folder ini berisi prototype eksperimen WebRTC untuk FamilyCam.
 - `webrtc-rs-poc/`
   - aplikasi PoC WebRTC berbasis `webrtc-rs` (jalur eksperimen terpisah).
 
-Catatan:
-- Dokumen plan/diskusi internal dipindahkan ke folder private lokal (`private-notes/`) dan tidak disertakan pada repo public.
 - Dokumentasi runnable untuk publik ada di `webrtc-rs-poc/README.md`.
 
 ## Status PoC Saat Ini
