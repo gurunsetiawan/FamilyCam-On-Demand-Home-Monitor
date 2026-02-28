@@ -2,9 +2,6 @@
 
 Repo ini dipisah menjadi jalur stabil (`main-app`) dan jalur eksperimen (`webrtc-experiment`) supaya keduanya bisa berkembang tanpa saling merusak.
 
-Catatan:
-- Dokumen plan/diskusi internal dipindahkan ke `private-notes/` (di-ignore dari git) agar repo public tetap bersih.
-
 ## Kenapa Proyek Ini Dibuat
 Saya membuat aplikasi ini untuk memanfaatkan barang/perangkat yang sudah ada di rumah untuk kebutuhan sendiri, khususnya monitoring keluarga secara sederhana, hemat biaya, dan tetap privat.
 
