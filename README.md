@@ -72,6 +72,21 @@ cd projects/webrtc-experiment/webrtc-rs-poc
 cargo run
 ```
 
+## 3) Prototype Comparisons
+Lokasi:
+- `projects/prototypes`
+
+Isi:
+- `go-pion-poc` (Go + Pion) sebagai pembanding langsung jalur `webrtc-rs-poc`.
+
+Jalankan:
+```bash
+cd projects/prototypes/go-pion-poc
+cp .env.example .env
+go mod tidy
+go run .
+```
+
 ## Lisensi
 lisensi untuk repo ini: **Apache-2.0**.
 

@@ -75,6 +75,43 @@ Field FPS dan resolusi memakai dropdown supaya lebih aman dari typo.
 - `Start Webcam` gagal:
   - pastikan device benar (`/dev/video0` dst) dan user punya akses grup `video`.
 
+## Benchmark Script
+Script benchmark untuk PoC ini tersedia di:
+- [scripts/benchmark-webrtc-rs.sh](/home/iwan/Project/family-cam-on-demand-home-monitor/scripts/benchmark-webrtc-rs.sh)
+
+Contoh (attach ke server yang sudah jalan):
+```bash
+cd /home/iwan/Project/family-cam-on-demand-home-monitor
+scripts/benchmark-webrtc-rs.sh --duration 180 --interval 2
+```
+
+Contoh (auto-start app + ambil publisher status):
+```bash
+cd /home/iwan/Project/family-cam-on-demand-home-monitor
+scripts/benchmark-webrtc-rs.sh --start-app --owner-token <POC_OWNER_TOKEN> --duration 180
+```
+
+Output tersimpan di `benchmarks/webrtc-rs/<timestamp>/` dalam bentuk:
+- `samples.csv`
+- `summary.txt`
+- `meta.txt`
+- raw JSON snapshots (`raw/healthz`, `raw/metrics`, `raw/publisher`)
+
+## Control Script
+Script kontrol cepat untuk owner action:
+- [scripts/control-webrtc-rs.sh](/home/iwan/Project/family-cam-on-demand-home-monitor/scripts/control-webrtc-rs.sh)
+
+Contoh:
+```bash
+cd /home/iwan/Project/family-cam-on-demand-home-monitor
+scripts/control-webrtc-rs.sh health
+scripts/control-webrtc-rs.sh --token <POC_OWNER_TOKEN> probe
+scripts/control-webrtc-rs.sh --token <POC_OWNER_TOKEN> pub-status
+scripts/control-webrtc-rs.sh --token <POC_OWNER_TOKEN> pub-start-test
+scripts/control-webrtc-rs.sh --token <POC_OWNER_TOKEN> --device /dev/video0 --input-format mjpeg --fps 15 --resolution 640x360 pub-start-webcam
+scripts/control-webrtc-rs.sh --token <POC_OWNER_TOKEN> pub-stop
+```
+
 ## Opsional: Pengirim RTP Manual
 Kalau ingin kirim RTP sendiri (tanpa endpoint publisher), contoh ffmpeg:
 ```bash
