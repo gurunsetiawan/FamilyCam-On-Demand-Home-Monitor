@@ -1,13 +1,17 @@
 package com.familycam.viewer
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,7 +20,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -27,6 +30,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -38,13 +42,22 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
 import com.familycam.viewer.ui.theme.FamilyCamViewerTheme
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -53,6 +66,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -103,12 +117,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private val Context.dataStore by preferencesDataStore(name = "familycam_viewer_prefs")
+
+private object PrefKeys {
+    val serverUrl = stringPreferencesKey("server_url")
+    val ownerToken = stringPreferencesKey("owner_token")
+}
+
 @Composable
 private fun AppScreen() {
-    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val localContext = androidx.compose.ui.platform.LocalContext.current
+    val appContext = localContext.applicationContext
+    val activity = remember(localContext) { localContext.findActivity() }
     val controller = remember { AppController(appContext) }
     val state = controller.state
     val selectedCamera = state.cameras.firstOrNull { it.path == state.devicePath }
+    var isFullscreen by remember { mutableStateOf(false) }
+    var isTokenVisible by remember { mutableStateOf(false) }
 
     val deviceOptions = mergeOptions(
         defaults = listOf("/dev/video0", "/dev/video1"),
@@ -131,10 +156,47 @@ private fun AppScreen() {
         current = state.fps,
     )
 
-    val connectColor = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E), contentColor = Color.White)
-    val dangerColor = ButtonDefaults.buttonColors(containerColor = Color(0xFFB91C1C), contentColor = Color.White)
-    val actionColor = ButtonDefaults.buttonColors(containerColor = Color(0xFF0EA5A8), contentColor = Color.White)
-    val warnColor = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706), contentColor = Color.White)
+    val bgTop = Color(0xFF0A0C10)
+    val bgBottom = Color(0xFF121722)
+    val cardColor = Color(0xFF111418)
+    val borderColor = Color(0xFF1E2530)
+    val accent = Color(0xFF00E5A0)
+    val accent2 = Color(0xFF00B8D4)
+    val danger = Color(0xFFFF3B5C)
+    val textPrimary = Color(0xFFE8EDF5)
+    val textMuted = Color(0xFF778299)
+
+    val connectColor = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color(0xFF0A0C10))
+    val dangerColor = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A1720), contentColor = Color(0xFFFF9DB0))
+    val actionColor = ButtonDefaults.buttonColors(containerColor = Color(0xFF18202B), contentColor = accent2)
+    val warnColor = ButtonDefaults.buttonColors(containerColor = Color(0xFF2B2318), contentColor = Color(0xFFFFB36B))
+
+    DisposableEffect(isFullscreen, activity) {
+        val targetActivity = activity
+        if (isFullscreen && targetActivity != null) {
+            runCatching {
+                targetActivity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                WindowCompat.setDecorFitsSystemWindows(targetActivity.window, false)
+                WindowInsetsControllerCompat(targetActivity.window, targetActivity.window.decorView).apply {
+                    hide(WindowInsetsCompat.Type.systemBars())
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            }
+        }
+        onDispose {
+            if (targetActivity != null) {
+                runCatching {
+                    targetActivity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    WindowCompat.setDecorFitsSystemWindows(targetActivity.window, true)
+                    WindowInsetsControllerCompat(targetActivity.window, targetActivity.window.decorView).show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+        }
+    }
+
+    BackHandler(enabled = isFullscreen) {
+        isFullscreen = false
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -142,35 +204,61 @@ private fun AppScreen() {
         }
     }
 
+    if (isFullscreen) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx -> controller.createRendererView(ctx) },
+            )
+            OutlinedButton(
+                onClick = { isFullscreen = false },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(14.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                border = BorderStroke(1.dp, Color(0x66FFFFFF)),
+            ) { Text("✕") }
+        }
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .background(
-                brush = Brush.verticalGradient(
-                    listOf(Color(0xFFE6FFFB), Color(0xFFF8FAFC)),
-                ),
-            )
+            .background(brush = Brush.verticalGradient(listOf(bgTop, bgBottom)))
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFECFEFF)),
+            colors = CardDefaults.cardColors(containerColor = cardColor),
         ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "FamilyCam",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        state.connectionState.uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state.connectionState == "connected") accent else textMuted,
+                    )
+                }
                 Text(
-                    "FamilyCam Kotlin Viewer",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF134E4A),
-                )
-                Text(
-                    "Status: ${state.connectionState} | Publisher: ${state.publisherState}",
+                    "Publisher: ${state.publisherState}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF115E59),
-                    maxLines = 2,
+                    color = textMuted,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 OutlinedTextField(
@@ -186,6 +274,12 @@ private fun AppScreen() {
                     label = { Text("Owner Token") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
+                    visualTransformation = if (isTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { isTokenVisible = !isTokenVisible }) {
+                            Text(if (isTokenVisible) "🙈" else "👁")
+                        }
+                    },
                 )
             }
         }
@@ -193,19 +287,46 @@ private fun AppScreen() {
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFFFF)),
+            colors = CardDefaults.cardColors(containerColor = cardColor),
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Viewer", style = MaterialTheme.typography.titleMedium)
-                Text("Session: ${state.sessionId.ifBlank { "-" }}")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text("Viewer", color = textMuted, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                    Text(
+                        state.sessionId.ifBlank { "session: -" },
+                        color = accent,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
 
-                AndroidView(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(220.dp)
-                        .background(Color.Black, RoundedCornerShape(10.dp)),
-                    factory = { ctx -> controller.createRendererView(ctx) },
-                )
+                        .background(Color.Black, RoundedCornerShape(12.dp)),
+                ) {
+                    AndroidView(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp),
+                        factory = { ctx -> controller.createRendererView(ctx) },
+                    )
+                    Text(
+                        "REC",
+                        color = danger,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(10.dp),
+                    )
+                    Button(
+                        onClick = { isFullscreen = true },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(10.dp),
+                        colors = actionColor,
+                    ) { Text("⛶") }
+                }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
@@ -225,68 +346,56 @@ private fun AppScreen() {
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFFFF)),
+            colors = CardDefaults.cardColors(containerColor = cardColor),
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Owner Controls", style = MaterialTheme.typography.titleMedium)
+                Text("Owner Controls", color = textMuted, style = MaterialTheme.typography.labelLarge)
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = { controller.probeCameras() },
-                        modifier = Modifier.weight(1f),
-                        colors = actionColor,
-                    ) { Text("Probe") }
-                    Button(
-                        onClick = { controller.publisherStatus() },
-                        modifier = Modifier.weight(1f),
-                        colors = actionColor,
-                    ) { Text("Status") }
+                    Button(onClick = { controller.probeCameras() }, modifier = Modifier.weight(1f), colors = actionColor) { Text("Probe") }
+                    Button(onClick = { controller.publisherStatus() }, modifier = Modifier.weight(1f), colors = actionColor) { Text("Status") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = { controller.startTestPattern() },
-                        modifier = Modifier.weight(1f),
-                        colors = warnColor,
-                    ) { Text("Test") }
-                    Button(
-                        onClick = { controller.stopPublisher() },
-                        modifier = Modifier.weight(1f),
-                        colors = dangerColor,
-                    ) { Text("Stop") }
+                    Button(onClick = { controller.startTestPattern() }, modifier = Modifier.weight(1f), colors = warnColor) { Text("Test") }
+                    Button(onClick = { controller.stopPublisher() }, modifier = Modifier.weight(1f), colors = dangerColor) { Text("Stop") }
                 }
 
-                HorizontalDivider(color = Color(0xFFCCFBF1))
+                HorizontalDivider(color = borderColor)
 
                 SelectionField(
-                    label = "Device (pilihan otomatis)",
+                    label = "Device",
                     selected = state.devicePath,
                     options = deviceOptions,
                     onSelect = controller::selectDevicePath,
+                    textColor = textPrimary,
+                    accentColor = accent2,
                 )
                 SelectionField(
                     label = "Input Format",
                     selected = state.inputFormat,
                     options = formatOptions,
                     onSelect = controller::selectInputFormat,
+                    textColor = textPrimary,
+                    accentColor = accent2,
                 )
                 SelectionField(
                     label = "FPS",
                     selected = state.fps,
                     options = fpsOptions,
                     onSelect = controller::selectFps,
+                    textColor = textPrimary,
+                    accentColor = accent2,
                 )
                 SelectionField(
                     label = "Resolution",
                     selected = state.resolution,
                     options = resolutionOptions,
                     onSelect = controller::selectResolution,
+                    textColor = textPrimary,
+                    accentColor = accent2,
                 )
 
-                Text(
-                    "Manual Override (opsional)",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Color(0xFF115E59),
-                )
+                Text("Manual Override", style = MaterialTheme.typography.labelLarge, color = textMuted)
                 OutlinedTextField(
                     value = state.devicePath,
                     onValueChange = controller::setDevicePath,
@@ -317,18 +426,16 @@ private fun AppScreen() {
                         singleLine = true,
                     )
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = { controller.startWebcam() },
-                        modifier = Modifier.weight(1f),
-                        colors = connectColor,
-                    ) { Text("Start Webcam") }
-                }
+                Button(
+                    onClick = { controller.startWebcam() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = connectColor,
+                ) { Text("Start Webcam") }
 
-                Text("Camera ditemukan: ${state.cameras.size}")
+                Text("Camera ditemukan: ${state.cameras.size}", color = textMuted, style = MaterialTheme.typography.bodySmall)
                 if (state.cameras.isNotEmpty()) {
                     val text = state.cameras.joinToString("\n") { "- ${it.name} (${it.path})" }
-                    Text(text, style = MaterialTheme.typography.bodySmall)
+                    Text(text, style = MaterialTheme.typography.bodySmall, color = textPrimary)
                 }
             }
         }
@@ -336,11 +443,11 @@ private fun AppScreen() {
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+            colors = CardDefaults.cardColors(containerColor = cardColor),
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Log", style = MaterialTheme.typography.titleMedium)
-                Text(state.logs.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
+                Text("Log", style = MaterialTheme.typography.titleMedium, color = textMuted)
+                Text(state.logs.joinToString("\n"), style = MaterialTheme.typography.bodySmall, color = textPrimary)
             }
         }
     }
@@ -352,15 +459,17 @@ private fun SelectionField(
     selected: String,
     options: List<String>,
     onSelect: (String) -> Unit,
+    textColor: Color,
+    accentColor: Color,
 ) {
     var expanded by remember(label, options, selected) { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, style = MaterialTheme.typography.labelLarge, color = Color(0xFF115E59))
+        Text(label, style = MaterialTheme.typography.labelLarge, color = textColor)
         Box(modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(
                 onClick = { expanded = true },
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF0F766E)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = accentColor),
             ) {
                 Text(
                     selected.ifBlank { "Pilih..." },
@@ -393,6 +502,12 @@ private fun mergeOptions(defaults: List<String>, probed: List<String>, current: 
         .distinct()
 }
 
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 private data class AppState(
     val serverUrl: String = "http://192.168.240.1:9180",
     val ownerToken: String = "",
@@ -410,6 +525,7 @@ private data class AppState(
 
 private class AppController(context: Context) {
     private val appContext = context.applicationContext
+    private val dataStore = appContext.dataStore
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val json = Json {
         ignoreUnknownKeys = true
@@ -436,12 +552,20 @@ private class AppController(context: Context) {
     var state by mutableStateOf(AppState())
         private set
 
+    init {
+        scope.launch {
+            restoreSavedCredentials()
+        }
+    }
+
     fun setServerUrl(v: String) {
         state = state.copy(serverUrl = v)
+        persistCredentials()
     }
 
     fun setOwnerToken(v: String) {
         state = state.copy(ownerToken = v)
+        persistCredentials()
     }
 
     fun setDevicePath(v: String) {
@@ -726,6 +850,39 @@ private class AppController(context: Context) {
         if (normalized.isEmpty()) return state.resolution
         val priority = listOf("320x240", "480x270", "640x360", "640x480", "854x480", "960x540")
         return priority.firstOrNull { it in normalized } ?: normalized.first()
+    }
+
+    private fun persistCredentials() {
+        val savedServerUrl = state.serverUrl.trim()
+        val savedOwnerToken = state.ownerToken
+        scope.launch(Dispatchers.IO) {
+            dataStore.edit { prefs ->
+                if (savedServerUrl.isBlank()) {
+                    prefs.remove(PrefKeys.serverUrl)
+                } else {
+                    prefs[PrefKeys.serverUrl] = savedServerUrl
+                }
+                if (savedOwnerToken.isBlank()) {
+                    prefs.remove(PrefKeys.ownerToken)
+                } else {
+                    prefs[PrefKeys.ownerToken] = savedOwnerToken
+                }
+            }
+        }
+    }
+
+    private suspend fun restoreSavedCredentials() {
+        runCatching {
+            val prefs = dataStore.data.first()
+            val savedServerUrl = prefs[PrefKeys.serverUrl]
+            val savedOwnerToken = prefs[PrefKeys.ownerToken]
+            state = state.copy(
+                serverUrl = savedServerUrl ?: state.serverUrl,
+                ownerToken = savedOwnerToken ?: state.ownerToken,
+            )
+        }.onFailure {
+            log("gagal load local settings: ${it.message}")
+        }
     }
 }
 
