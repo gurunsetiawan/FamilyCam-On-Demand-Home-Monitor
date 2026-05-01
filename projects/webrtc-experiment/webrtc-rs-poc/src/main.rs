@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
     env,
     net::SocketAddr,
     process::Stdio,
@@ -208,6 +208,7 @@ struct PublisherProcess {
     started_unix: u64,
     command: String,
     args: Vec<String>,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -215,6 +216,8 @@ struct PublisherExitInfo {
     exited_unix: u64,
     code: Option<i32>,
     success: bool,
+    error: Option<String>,
+    stderr: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -416,11 +419,11 @@ fn refresh_publisher_state_locked(state: &mut PublisherState) {
     if let Some(process) = state.running.as_mut() {
         match process.child.try_wait() {
             Ok(Some(status)) => {
-                state.last_exit = Some(PublisherExitInfo {
-                    exited_unix: now_unix(),
-                    code: status.code(),
-                    success: status.success(),
-                });
+                state.last_exit = Some(PublisherExitInfo::from_status(
+                    status,
+                    None,
+                    stderr_tail_to_string(&process.stderr_tail),
+                ));
                 state.running = None;
             }
             Ok(None) => {}
@@ -429,6 +432,76 @@ fn refresh_publisher_state_locked(state: &mut PublisherState) {
             }
         }
     }
+}
+
+impl PublisherExitInfo {
+    fn from_status(
+        status: std::process::ExitStatus,
+        error: Option<String>,
+        stderr: Option<String>,
+    ) -> Self {
+        Self {
+            exited_unix: now_unix(),
+            code: status.code(),
+            success: status.success(),
+            error,
+            stderr,
+        }
+    }
+}
+
+fn stderr_tail_to_string(buf: &Arc<Mutex<VecDeque<u8>>>) -> Option<String> {
+    match buf.try_lock() {
+        Ok(guard) => {
+            let bytes = guard.iter().copied().collect::<Vec<_>>();
+            let text = String::from_utf8_lossy(&bytes).trim().to_string();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn publisher_exit_summary(exit: Option<&PublisherExitInfo>) -> String {
+    let Some(exit) = exit else {
+        return "unknown".to_string();
+    };
+    let mut parts = vec![format!("code={:?}", exit.code)];
+    if let Some(error) = &exit.error {
+        parts.push(error.clone());
+    }
+    if let Some(stderr) = &exit.stderr {
+        parts.push(stderr.clone());
+    }
+    parts.join(" ")
+}
+
+fn spawn_stderr_tail_reader(
+    mut stderr: tokio::process::ChildStderr,
+    tail: Arc<Mutex<VecDeque<u8>>>,
+) {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0_u8; 1024];
+        loop {
+            match stderr.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut guard = tail.lock().await;
+                    for byte in &buf[..n] {
+                        guard.push_back(*byte);
+                    }
+                    while guard.len() > 4096 {
+                        guard.pop_front();
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 fn publisher_status_response(state: &PublisherState) -> PublisherStatusResponse {
@@ -489,16 +562,20 @@ async fn publisher_start(
         ));
     }
 
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
     let mut cmd = Command::new(&bin);
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| ApiError::Internal(format!("start publisher gagal: {e}")))?;
+    if let Some(stderr) = child.stderr.take() {
+        spawn_stderr_tail_reader(stderr, stderr_tail.clone());
+    }
     let pid = child.id();
     publisher.running = Some(PublisherProcess {
         child,
@@ -506,7 +583,17 @@ async fn publisher_start(
         started_unix: now_unix(),
         command: bin.clone(),
         args: args.clone(),
+        stderr_tail: stderr_tail.clone(),
     });
+    sleep(Duration::from_millis(750)).await;
+    refresh_publisher_state_locked(&mut publisher);
+    if publisher.running.is_none() {
+        let exit = publisher.last_exit.clone();
+        return Err(ApiError::Internal(format!(
+            "publisher exited immediately: {}",
+            publisher_exit_summary(exit.as_ref())
+        )));
+    }
     info!("publisher started pid={pid:?} cmd={} args={:?}", bin, args);
 
     Ok(Json(publisher_status_response(&publisher)))
@@ -581,14 +668,25 @@ async fn probe_cameras() -> Result<Vec<CameraOption>, ApiError> {
     for (label, path) in camera_entries {
         let mut formats = probe_formats_for_device(&path).await;
         formats.sort();
-        cameras.push(CameraOption {
-            label,
-            path,
-            formats,
-        });
+        if has_usable_capture_format(&formats) {
+            cameras.push(CameraOption {
+                label,
+                path,
+                formats,
+            });
+        }
     }
 
     Ok(cameras)
+}
+
+fn has_usable_capture_format(formats: &[String]) -> bool {
+    formats.iter().any(|format| {
+        matches!(
+            format.trim().to_ascii_uppercase().as_str(),
+            "MJPG" | "JPEG" | "YUYV" | "YUY2" | "H264" | "NV12" | "NV21" | "BGR3" | "RGB3"
+        )
+    })
 }
 
 async fn probe_formats_for_device(path: &str) -> Vec<String> {
@@ -728,7 +826,7 @@ async fn webrtc_offer(
             .add_track(local_track)
             .await
             .map_err(|e| anyhow!("add track failed: {e}"))?;
-        spawn_rtcp_reader(session_id, sender);
+        spawn_rtcp_reader(state.clone(), session_id, sender);
 
         let offer =
             RTCSessionDescription::offer(req.sdp).map_err(|e| anyhow!("invalid offer sdp: {e}"))?;
@@ -769,11 +867,13 @@ async fn webrtc_offer(
     }
 }
 
-fn spawn_rtcp_reader(session_id: Uuid, sender: Arc<RTCRtpSender>) {
+fn spawn_rtcp_reader(state: AppState, session_id: Uuid, sender: Arc<RTCRtpSender>) {
     tokio::spawn(async move {
         loop {
             match sender.read_rtcp().await {
-                Ok(_) => {}
+                Ok(_) => {
+                    touch_session(&state, session_id).await;
+                }
                 Err(err) => {
                     info!("rtcp reader closed for session {session_id}: {err}");
                     break;
@@ -1080,11 +1180,11 @@ async fn stop_publisher_process(state: &AppState, reason: &str) -> Result<bool, 
 
     let wait_result = timeout(Duration::from_secs(5), process.child.wait()).await;
     let exit_info = match wait_result {
-        Ok(Ok(status)) => PublisherExitInfo {
-            exited_unix: now_unix(),
-            code: status.code(),
-            success: status.success(),
-        },
+        Ok(Ok(status)) => PublisherExitInfo::from_status(
+            status,
+            None,
+            stderr_tail_to_string(&process.stderr_tail),
+        ),
         Ok(Err(err)) => {
             return Err(ApiError::Internal(format!(
                 "gagal menunggu publisher stop: {err}"
@@ -1097,11 +1197,11 @@ async fn stop_publisher_process(state: &AppState, reason: &str) -> Result<bool, 
                 .wait()
                 .await
                 .map_err(|e| ApiError::Internal(format!("force kill publisher gagal: {e}")))?;
-            PublisherExitInfo {
-                exited_unix: now_unix(),
-                code: status.code(),
-                success: status.success(),
-            }
+            PublisherExitInfo::from_status(
+                status,
+                Some("force killed after stop timeout".to_string()),
+                stderr_tail_to_string(&process.stderr_tail),
+            )
         }
     };
 

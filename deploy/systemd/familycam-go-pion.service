@@ -1,5 +1,5 @@
 [Unit]
-Description=FamilyCam On-Demand Camera
+Description=FamilyCam Go Pion PoC
 After=network-online.target
 Wants=network-online.target
 
@@ -7,14 +7,13 @@ Wants=network-online.target
 Type=simple
 User=orangepi
 Group=video
-WorkingDirectory=/opt/familycam/projects/main-app
-EnvironmentFile=-/opt/familycam/projects/main-app/.env
-ExecStart=/opt/familycam/projects/main-app/target/release/family-cam-on-demand-home-monitor
+WorkingDirectory=/opt/familycam/projects/prototypes/go-pion-poc
+EnvironmentFile=-/opt/familycam/projects/prototypes/go-pion-poc/.env
+ExecStart=/opt/familycam/projects/prototypes/go-pion-poc/familycam-go-pion-poc
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
 
-# Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
@@ -25,8 +24,8 @@ ProtectKernelModules=true
 LockPersonality=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
-MemoryMax=200M
-LimitNOFILE=1024
+MemoryMax=384M
+LimitNOFILE=2048
 
 [Install]
 WantedBy=multi-user.target

@@ -66,9 +66,11 @@ type IngestStats struct {
 }
 
 type PublisherExit struct {
-	ExitedUnix int64 `json:"exited_unix"`
-	Code       int   `json:"code"`
-	Success    bool  `json:"success"`
+	ExitedUnix int64  `json:"exited_unix"`
+	Code       int    `json:"code"`
+	Success    bool   `json:"success"`
+	Error      string `json:"error,omitempty"`
+	Stderr     string `json:"stderr,omitempty"`
 }
 
 type PublisherProcess struct {
@@ -79,6 +81,7 @@ type PublisherProcess struct {
 	command     string
 	args        []string
 	cancelGuard context.CancelFunc
+	stderr      *limitedBuffer
 }
 
 type PublisherState struct {
@@ -101,6 +104,35 @@ type App struct {
 
 	publisherMu sync.Mutex
 	publisher   PublisherState
+}
+
+type limitedBuffer struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func newLimitedBuffer(limit int) *limitedBuffer {
+	return &limitedBuffer{limit: limit}
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.data = append(b.data, p...)
+	if b.limit > 0 && len(b.data) > b.limit {
+		b.data = append([]byte(nil), b.data[len(b.data)-b.limit:]...)
+	}
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(append([]byte(nil), b.data...))
 }
 
 type offerRequest struct {
@@ -465,16 +497,17 @@ func (a *App) handleOffer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("add track failed: %v", err))
 		return
 	}
+	sessionID := uuid.NewString()
 	go func() {
 		rtcpBuf := make([]byte, 1500)
 		for {
 			if _, _, readErr := sender.Read(rtcpBuf); readErr != nil {
 				return
 			}
+			a.touchSession(sessionID)
 		}
 	}()
 
-	sessionID := uuid.NewString()
 	entry := &SessionEntry{ID: sessionID, PC: pc, CreatedAt: time.Now(), LastSeen: time.Now()}
 	a.sessionsMu.Lock()
 	if len(a.sessions) >= a.cfg.MaxSessions {
@@ -627,7 +660,7 @@ func probeCameras() ([]cameraDevice, error) {
 		cameras[i].Resolutions = resolutions
 		cameras[i].FPSOptions = fps
 	}
-	return cameras, nil
+	return usableCaptureCameras(cameras), nil
 }
 
 func probeCamerasByGlob() ([]cameraDevice, error) {
@@ -648,7 +681,27 @@ func probeCamerasByGlob() ([]cameraDevice, error) {
 			FPSOptions:  fps,
 		})
 	}
-	return cameras, nil
+	return usableCaptureCameras(cameras), nil
+}
+
+func usableCaptureCameras(cameras []cameraDevice) []cameraDevice {
+	out := make([]cameraDevice, 0, len(cameras))
+	for _, camera := range cameras {
+		if hasUsableCaptureFormat(camera.Formats) {
+			out = append(out, camera)
+		}
+	}
+	return out
+}
+
+func hasUsableCaptureFormat(formats []cameraFormat) bool {
+	for _, format := range formats {
+		switch strings.ToUpper(strings.TrimSpace(format.Code)) {
+		case "MJPG", "JPEG", "YUYV", "YUY2", "H264", "NV12", "NV21", "BGR3", "RGB3":
+			return true
+		}
+	}
+	return false
 }
 
 func parseCameraDevices(raw string) []cameraDevice {
@@ -753,7 +806,11 @@ func ffmpegInputFormatFromCode(code string) string {
 	switch strings.ToUpper(strings.TrimSpace(code)) {
 	case "MJPG":
 		return "mjpeg"
+	case "JPEG":
+		return "mjpeg"
 	case "YUYV":
+		return "yuyv422"
+	case "YUY2":
 		return "yuyv422"
 	case "H264":
 		return "h264"
@@ -872,7 +929,8 @@ func (a *App) startPublisher(bin string, args []string) (bool, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	stderr := newLimitedBuffer(4096)
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return false, fmt.Errorf("start publisher gagal: %w", err)
@@ -886,6 +944,7 @@ func (a *App) startPublisher(bin string, args []string) (bool, error) {
 		command:     bin,
 		args:        append([]string{}, args...),
 		cancelGuard: cancel,
+		stderr:      stderr,
 	}
 	a.publisher.Running = proc
 
@@ -894,6 +953,19 @@ func (a *App) startPublisher(bin string, args []string) (bool, error) {
 		p.done <- err
 		close(p.done)
 	}(proc)
+
+	select {
+	case err, ok := <-proc.done:
+		exit := publisherExitFromWait(err, proc.stderr.String())
+		a.publisher.LastExit = exit
+		a.publisher.Running = nil
+		cancel()
+		if ok {
+			return false, fmt.Errorf("publisher exited immediately: %s", publisherExitSummary(exit))
+		}
+		return false, fmt.Errorf("publisher exited immediately")
+	case <-time.After(750 * time.Millisecond):
+	}
 
 	log.Printf("publisher started pid=%d cmd=%s args=%v", proc.pid, bin, args)
 	return true, nil
@@ -926,12 +998,39 @@ func (a *App) stopPublisher(reason string) (bool, error) {
 	}
 	proc.cancelGuard()
 
-	exit := &PublisherExit{ExitedUnix: time.Now().Unix(), Code: extractExitCode(waitErr), Success: waitErr == nil}
+	exit := publisherExitFromWait(waitErr, proc.stderr.String())
 	a.publisherMu.Lock()
 	a.publisher.LastExit = exit
 	a.publisherMu.Unlock()
 	log.Printf("publisher stopped pid=%d reason=%s", proc.pid, reason)
 	return true, nil
+}
+
+func publisherExitFromWait(err error, stderr string) *PublisherExit {
+	exit := &PublisherExit{
+		ExitedUnix: time.Now().Unix(),
+		Code:       extractExitCode(err),
+		Success:    err == nil,
+		Stderr:     strings.TrimSpace(stderr),
+	}
+	if err != nil {
+		exit.Error = err.Error()
+	}
+	return exit
+}
+
+func publisherExitSummary(exit *PublisherExit) string {
+	if exit == nil {
+		return "unknown"
+	}
+	parts := []string{fmt.Sprintf("code=%d", exit.Code)}
+	if exit.Error != "" {
+		parts = append(parts, exit.Error)
+	}
+	if exit.Stderr != "" {
+		parts = append(parts, exit.Stderr)
+	}
+	return strings.Join(parts, " ")
 }
 
 func extractExitCode(err error) int {
@@ -976,7 +1075,7 @@ func (a *App) refreshPublisherStateNoLock() {
 	select {
 	case err, ok := <-a.publisher.Running.done:
 		if ok {
-			a.publisher.LastExit = &PublisherExit{ExitedUnix: time.Now().Unix(), Code: extractExitCode(err), Success: err == nil}
+			a.publisher.LastExit = publisherExitFromWait(err, a.publisher.Running.stderr.String())
 		}
 		a.publisher.Running = nil
 	default:

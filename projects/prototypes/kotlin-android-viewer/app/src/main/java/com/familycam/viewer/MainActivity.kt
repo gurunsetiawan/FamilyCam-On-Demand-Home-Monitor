@@ -213,6 +213,7 @@ private fun AppScreen() {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx -> controller.createRendererView(ctx) },
+                onRelease = { view -> controller.releaseRendererView(view) },
             )
             OutlinedButton(
                 onClick = { isFullscreen = false },
@@ -312,6 +313,7 @@ private fun AppScreen() {
                             .fillMaxWidth()
                             .height(220.dp),
                         factory = { ctx -> controller.createRendererView(ctx) },
+                        onRelease = { view -> controller.releaseRendererView(view) },
                     )
                     Text(
                         "REC",
@@ -619,6 +621,10 @@ private class AppController(context: Context) {
 
     fun createRendererView(ctx: Context): SurfaceViewRenderer {
         return webrtc.createRendererView(ctx)
+    }
+
+    fun releaseRendererView(view: SurfaceViewRenderer) {
+        webrtc.releaseRendererView(view)
     }
 
     fun connect() {
@@ -934,9 +940,22 @@ private class WebRtcEngine(
         view.init(eglBase.eglBaseContext, null)
         view.setEnableHardwareScaler(true)
         view.setMirror(false)
-        renderer = view
-        bindRemoteTrackToRenderer()
+        attachRenderer(view)
         return view
+    }
+
+    fun releaseRendererView(view: SurfaceViewRenderer) {
+        val track = remoteVideoTrack
+        mainHandler.post {
+            try {
+                track?.removeSink(view)
+                view.release()
+            } catch (_: Exception) {
+            }
+        }
+        if (renderer === view) {
+            renderer = null
+        }
     }
 
     suspend fun connect(baseUrl: String, iceServers: List<String>) {
@@ -1071,6 +1090,23 @@ private class WebRtcEngine(
                 track.addSink(view)
             } catch (e: Exception) {
                 onError("addSink gagal: ${e.message}")
+            }
+        }
+    }
+
+    private fun attachRenderer(view: SurfaceViewRenderer) {
+        val old = renderer
+        val track = remoteVideoTrack
+        renderer = view
+        mainHandler.post {
+            try {
+                if (old != null && old !== view) {
+                    track?.removeSink(old)
+                    old.release()
+                }
+                track?.addSink(view)
+            } catch (e: Exception) {
+                onError("renderer attach gagal: ${e.message}")
             }
         }
     }
