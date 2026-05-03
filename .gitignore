@@ -4,8 +4,8 @@
 !/projects/main-app/logs/.gitkeep
 /projects/main-app/snapshots/*
 !/projects/main-app/snapshots/.gitkeep
-/projects/webrtc-experiment/webrtc-rs-poc/target
-/projects/webrtc-experiment/webrtc-rs-poc/.env
+/projects/beta-webrtc-rs/webrtc-rs-poc/target
+/projects/beta-webrtc-rs/webrtc-rs-poc/.env
 /projects/main-app/plan*.md
 /private-notes/
 /benchmarks/

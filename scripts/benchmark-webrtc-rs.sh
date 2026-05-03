@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Benchmark helper for projects/webrtc-experiment/webrtc-rs-poc.
+# Benchmark helper for projects/beta-webrtc-rs/webrtc-rs-poc.
 # Collects /healthz and /metrics snapshots periodically and writes CSV summary.
 #
 # Examples:
 #   scripts/benchmark-webrtc-rs.sh
 #   scripts/benchmark-webrtc-rs.sh --duration 300 --interval 2
 #   scripts/benchmark-webrtc-rs.sh --owner-token token123
-#   scripts/benchmark-webrtc-rs.sh --start-app --app-dir projects/webrtc-experiment/webrtc-rs-poc
+#   scripts/benchmark-webrtc-rs.sh --start-app --app-dir projects/beta-webrtc-rs/webrtc-rs-poc
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="${ROOT_DIR}/projects/webrtc-experiment/webrtc-rs-poc"
+APP_DIR="${ROOT_DIR}/projects/beta-webrtc-rs/webrtc-rs-poc"
 BASE_URL="http://127.0.0.1:9080"
 DURATION_SECS=120
 INTERVAL_SECS=2
@@ -31,7 +31,7 @@ Options:
   --url <base_url>          Server base URL (default: http://127.0.0.1:9080)
   --owner-token <token>     Optional owner token (collect /publisher/status)
   --out-dir <path>          Output directory (default: auto timestamped)
-  --app-dir <path>          webrtc-rs app dir (default: projects/webrtc-experiment/webrtc-rs-poc)
+  --app-dir <path>          webrtc-rs app dir (default: projects/beta-webrtc-rs/webrtc-rs-poc)
   --start-app               Start app before benchmark
   --start-cmd <command>     Command used with --start-app (default: cargo run)
   --wait-health <secs>      Health wait timeout when --start-app (default: 60)

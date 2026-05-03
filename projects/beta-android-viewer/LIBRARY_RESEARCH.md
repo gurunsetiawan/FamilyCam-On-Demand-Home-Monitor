@@ -1,6 +1,6 @@
 # Kotlin Android Viewer - Library Research (Maret 2026)
 
-Tujuan riset ini: pilih library untuk aplikasi Android native (`kotlin-android-viewer`) yang bisa jadi viewer/control untuk FamilyCam.
+Tujuan riset ini: pilih library untuk aplikasi Android native (`beta-android-viewer`) yang bisa jadi viewer/control untuk FamilyCam.
 
 ## Keputusan Final (per 1 Maret 2026)
 - Library WebRTC utama: `io.github.webrtc-sdk:android:137.7151.05`
@@ -17,7 +17,7 @@ Tujuan riset ini: pilih library untuk aplikasi Android native (`kotlin-android-v
 ## Opsi Library
 
 ### 1) Custom WebRTC client (paling cocok dengan backend sekarang)
-Ini tetap pakai backend kamu (go-pion-poc / webrtc-rs-poc), jadi Android app hanya viewer + signaling client.
+Ini tetap pakai backend kamu (beta-go-pion / webrtc-rs-poc), jadi Android app hanya viewer + signaling client.
 
 Library kandidat:
 - WebRTC core Android:

@@ -1,5 +1,5 @@
 [Unit]
-Description=FamilyCam WebRTC Rust PoC
+Description=FamilyCam WebRTC Rust Beta
 After=network-online.target
 Wants=network-online.target
 
@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=orangepi
 Group=video
-WorkingDirectory=/opt/familycam/projects/webrtc-experiment/webrtc-rs-poc
-EnvironmentFile=-/opt/familycam/projects/webrtc-experiment/webrtc-rs-poc/.env
-ExecStart=/opt/familycam/projects/webrtc-experiment/webrtc-rs-poc/target/release/familycam-webrtc-rs-poc
+WorkingDirectory=/opt/familycam/projects/beta-webrtc-rs/webrtc-rs-poc
+EnvironmentFile=-/opt/familycam/projects/beta-webrtc-rs/webrtc-rs-poc/.env
+ExecStart=/opt/familycam/projects/beta-webrtc-rs/webrtc-rs-poc/target/release/familycam-webrtc-rs-poc
 Restart=always
 RestartSec=5
 TimeoutStopSec=15

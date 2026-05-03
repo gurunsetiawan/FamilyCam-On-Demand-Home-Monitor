@@ -18,14 +18,14 @@ cargo build --release
 WebRTC Rust PoC:
 
 ```bash
-cd /opt/familycam/projects/webrtc-experiment/webrtc-rs-poc
+cd /opt/familycam/projects/beta-webrtc-rs/webrtc-rs-poc
 cargo build --release
 ```
 
 Go Pion PoC:
 
 ```bash
-cd /opt/familycam/projects/prototypes/go-pion-poc
+cd /opt/familycam/projects/beta-go-pion
 go build -o familycam-go-pion-poc .
 ```
 

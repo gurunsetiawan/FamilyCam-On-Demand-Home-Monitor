@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "familycam-kotlin-android-viewer"
+rootProject.name = "familycam-beta-android-viewer"
 include(":app")

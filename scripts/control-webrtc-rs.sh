@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Control helper for projects/webrtc-experiment/webrtc-rs-poc.
+# Control helper for projects/beta-webrtc-rs/webrtc-rs-poc.
 # Provides quick owner actions for camera probe and publisher lifecycle.
 
 BASE_URL="${FAMILYCAM_URL:-http://127.0.0.1:9080}"
@@ -82,14 +82,16 @@ req_get() {
 req_owner_get() {
   local path="$1"
   require_owner
-  curl -fsS "${BASE_URL}${path}?token=${OWNER_TOKEN}"
+  curl -fsS "${BASE_URL}${path}" \
+    -H "Authorization: Bearer ${OWNER_TOKEN}"
 }
 
 req_owner_post_json() {
   local path="$1"
   local body="${2:-{}}"
   require_owner
-  curl -fsS -X POST "${BASE_URL}${path}?token=${OWNER_TOKEN}" \
+  curl -fsS -X POST "${BASE_URL}${path}" \
+    -H "Authorization: Bearer ${OWNER_TOKEN}" \
     -H 'content-type: application/json' \
     -d "${body}"
 }
@@ -105,58 +107,16 @@ get_rtp_listen_addr() {
 }
 
 build_webcam_start_body() {
-  local rtp_addr
-  rtp_addr="$(get_rtp_listen_addr)"
-  if [[ -z "${rtp_addr}" ]]; then
-    echo "Cannot determine rtp_listen from /healthz." >&2
-    exit 1
-  fi
-
-  local args=(
-    "-f" "v4l2"
-  )
-  if [[ -n "${INPUT_FORMAT}" ]]; then
-    args+=("-input_format" "${INPUT_FORMAT}")
-  fi
-  if [[ -n "${FPS}" ]]; then
-    args+=("-framerate" "${FPS}")
-  fi
-  if [[ -n "${RESOLUTION}" ]]; then
-    args+=("-video_size" "${RESOLUTION}")
-  fi
-  args+=(
-    "-i" "${DEVICE}"
-    "-an"
-    "-c:v" "libx264"
-    "-preset" "ultrafast"
-    "-tune" "zerolatency"
-    "-pix_fmt" "yuv420p"
-    "-profile:v" "baseline"
-    "-level" "3.1"
-    "-g" "30"
-    "-keyint_min" "30"
-    "-sc_threshold" "0"
-    "-f" "rtp"
-    "rtp://${rtp_addr}"
-  )
-
   if command -v jq >/dev/null 2>&1; then
-    jq -n --arg bin "${BIN}" --argjson args "$(printf '%s\n' "${args[@]}" | jq -R . | jq -cs .)" \
-      '{bin: $bin, args: $args}'
+    jq -n \
+      --arg device "${DEVICE}" \
+      --arg input_format "${INPUT_FORMAT}" \
+      --arg resolution "${RESOLUTION}" \
+      --argjson fps "${FPS}" \
+      '{"test_pattern":false,"device":$device,"input_format":$input_format,"fps":$fps,"resolution":$resolution}'
   else
-    # Minimal JSON builder fallback.
-    local json='{"bin":"'"${BIN}"'","args":['
-    local first=1
-    local a
-    for a in "${args[@]}"; do
-      if [[ "${first}" -eq 0 ]]; then
-        json+=","
-      fi
-      first=0
-      json+="\"${a}\""
-    done
-    json+="]}"
-    printf '%s\n' "${json}"
+    printf '{"test_pattern":false,"device":"%s","input_format":"%s","fps":%s,"resolution":"%s"}\n' \
+      "${DEVICE}" "${INPUT_FORMAT}" "${FPS}" "${RESOLUTION}"
   fi
 }
 

@@ -22,7 +22,7 @@ Filosofi utama:
 Folder ini adalah jalur stabil FamilyCam (non-WebRTC) untuk penggunaan harian.
 
 Eksperimen WebRTC dipisah di:
-- `../webrtc-experiment/webrtc-rs-poc`
+- `../beta-webrtc-rs/webrtc-rs-poc`
 
 ## Tech Stack
 - Bahasa: Rust

@@ -1,6 +1,13 @@
 # FamilyCam (On-Demand Home Monitor) Workspace
 
-Repo ini dipisah menjadi jalur stabil (`main-app`) dan jalur beta (`webrtc-experiment` + `prototypes`) supaya keduanya bisa berkembang tanpa saling merusak.
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
+![Main App](https://img.shields.io/badge/main--app-stable-2e8b57.svg)
+![WebRTC-rs](https://img.shields.io/badge/webrtc--rs-beta-f59e0b.svg)
+![Go Pion](https://img.shields.io/badge/go--pion-beta-f59e0b.svg)
+![Android Viewer](https://img.shields.io/badge/android--viewer-beta-f59e0b.svg)
+![Access](https://img.shields.io/badge/access-private%20network%20or%20VPN-informational.svg)
+
+Repo ini dipisah menjadi jalur stabil (`main-app`) dan jalur beta (`beta-webrtc-rs`, `beta-go-pion`, `beta-android-viewer`) supaya keduanya bisa berkembang tanpa saling merusak.
 
 ## Kenapa Proyek Ini Dibuat
 Saya membuat aplikasi ini untuk memanfaatkan barang/perangkat yang sudah ada di rumah untuk kebutuhan sendiri, khususnya monitoring keluarga secara sederhana, hemat biaya, dan tetap privat.
@@ -52,7 +59,7 @@ scripts/check-camera.sh
 
 ## 2) WebRTC Rust (Beta)
 Lokasi:
-- `projects/webrtc-experiment`
+- `projects/beta-webrtc-rs`
 
 Isi:
 - `webrtc-rs-poc` (status: Beta)
@@ -68,21 +75,21 @@ Status terbaru:
 
 Jalankan:
 ```bash
-cd projects/webrtc-experiment/webrtc-rs-poc
+cd projects/beta-webrtc-rs/webrtc-rs-poc
 cargo run
 ```
 
 ## 3) WebRTC Go + Android (Beta)
 Lokasi:
-- `projects/prototypes`
+- `projects/`
 
 Isi:
-- `go-pion-poc` (status: Beta)
-- `kotlin-android-viewer` (status: Beta)
+- `beta-go-pion` (status: Beta)
+- `beta-android-viewer` (status: Beta)
 
 Jalankan:
 ```bash
-cd projects/prototypes/go-pion-poc
+cd projects/beta-go-pion
 cp .env.example .env
 go mod tidy
 go run .

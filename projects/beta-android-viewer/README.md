@@ -3,7 +3,7 @@
 Android native viewer/control untuk backend FamilyCam (Go/Rust), status **Beta**.
 
 Status saat ini:
-- Riset library selesai di [LIBRARY_RESEARCH.md](/home/iwan/Project/family-cam-on-demand-home-monitor/projects/prototypes/kotlin-android-viewer/LIBRARY_RESEARCH.md)
+- Riset library selesai di [LIBRARY_RESEARCH.md](/home/iwan/Project/family-cam-on-demand-home-monitor/projects/beta-android-viewer/LIBRARY_RESEARCH.md)
 - Integrasi owner control endpoint sudah aktif (`probe`, `publisher status/start/stop`)
 - Integrasi WebRTC native dasar sudah aktif (`connect/disconnect` + video renderer)
 - Owner auth dikirim via `Authorization: Bearer <token>`
@@ -37,7 +37,7 @@ Status saat ini:
 
 ## Menjalankan
 ```bash
-cd projects/prototypes/kotlin-android-viewer
+cd projects/beta-android-viewer
 ./gradlew :app:help
 ```
 

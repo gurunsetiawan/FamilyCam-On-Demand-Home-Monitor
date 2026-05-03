@@ -1,5 +1,5 @@
 [Unit]
-Description=FamilyCam Go Pion PoC
+Description=FamilyCam Go Pion Beta
 After=network-online.target
 Wants=network-online.target
 
@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=orangepi
 Group=video
-WorkingDirectory=/opt/familycam/projects/prototypes/go-pion-poc
-EnvironmentFile=-/opt/familycam/projects/prototypes/go-pion-poc/.env
-ExecStart=/opt/familycam/projects/prototypes/go-pion-poc/familycam-go-pion-poc
+WorkingDirectory=/opt/familycam/projects/beta-go-pion
+EnvironmentFile=-/opt/familycam/projects/beta-go-pion/.env
+ExecStart=/opt/familycam/projects/beta-go-pion/familycam-go-pion-poc
 Restart=always
 RestartSec=5
 TimeoutStopSec=15

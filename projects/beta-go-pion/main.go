@@ -244,7 +244,7 @@ func main() {
 	mux.HandleFunc("/publisher/start", app.handlePublisherStart)
 	mux.HandleFunc("/publisher/stop", app.handlePublisherStop)
 
-	log.Printf("go-pion-poc listening on http://%s (RTP ingest: %s)", cfg.BindAddr, cfg.RTPListenAddr)
+	log.Printf("beta-go-pion listening on http://%s (RTP ingest: %s)", cfg.BindAddr, cfg.RTPListenAddr)
 	if err := http.ListenAndServe(cfg.BindAddr, logMiddleware(mux)); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}

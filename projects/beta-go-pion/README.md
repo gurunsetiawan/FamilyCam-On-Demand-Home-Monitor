@@ -1,6 +1,6 @@
 # FamilyCam Go + Pion (Beta)
 
-Komponen Beta pembanding untuk `projects/webrtc-experiment/webrtc-rs-poc`.
+Komponen Beta pembanding untuk `projects/beta-webrtc-rs/webrtc-rs-poc`.
 
 Tujuan:
 - bandingkan stabilitas koneksi
@@ -19,7 +19,7 @@ Tujuan:
 
 ## Jalankan
 ```bash
-cd projects/prototypes/go-pion-poc
+cd projects/beta-go-pion
 cp .env.example .env
 sudo apt install -y ffmpeg v4l-utils
 go mod tidy
