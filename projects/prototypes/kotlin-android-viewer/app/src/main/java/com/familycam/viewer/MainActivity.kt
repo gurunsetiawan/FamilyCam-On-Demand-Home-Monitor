@@ -1272,8 +1272,11 @@ private class FamilyCamApi(private val json: Json) {
         token: String? = null,
         bodyJson: String? = null,
     ): String = withContext(Dispatchers.IO) {
-        val url = buildUrl(baseUrl, path, token)
+        val url = buildUrl(baseUrl, path)
         val builder = Request.Builder().url(url)
+        if (!token.isNullOrBlank()) {
+            builder.header("Authorization", "Bearer ${token.trim()}")
+        }
 
         val requestBody = if (bodyJson != null) {
             bodyJson.toRequestBody("application/json; charset=utf-8".toMediaType())
@@ -1298,16 +1301,11 @@ private class FamilyCamApi(private val json: Json) {
         }
     }
 
-    private fun buildUrl(baseUrl: String, path: String, token: String?): String {
+    private fun buildUrl(baseUrl: String, path: String): String {
         val normalized = baseUrl.trim().trimEnd('/')
         val raw = "$normalized$path"
         val base = raw.toHttpUrlOrNull() ?: throw IllegalArgumentException("base URL invalid: $raw")
-        val withQuery = if (!token.isNullOrBlank()) {
-            base.newBuilder().addQueryParameter("token", token).build()
-        } else {
-            base
-        }
-        return withQuery.toString()
+        return base.toString()
     }
 
     private fun parseError(raw: String): String {

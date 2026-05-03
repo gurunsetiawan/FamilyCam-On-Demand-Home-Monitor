@@ -47,6 +47,11 @@ type Config struct {
 	IceUsername                string
 	IceCredential              string
 	PublisherStopGraceDuration time.Duration
+	AllowRawPublisherArgs      bool
+	OwnerRateLimitPerMinute    int
+	OfferRateLimitPerMinute    int
+	StatusRateLimitPerMinute   int
+	PublisherCooldown          time.Duration
 }
 
 type SessionEntry struct {
@@ -85,8 +90,9 @@ type PublisherProcess struct {
 }
 
 type PublisherState struct {
-	Running  *PublisherProcess
-	LastExit *PublisherExit
+	Running        *PublisherProcess
+	LastExit       *PublisherExit
+	LastChangeUnix int64
 }
 
 type App struct {
@@ -104,6 +110,8 @@ type App struct {
 
 	publisherMu sync.Mutex
 	publisher   PublisherState
+	rateMu      sync.Mutex
+	rateLimiter map[string][]int64
 }
 
 type limitedBuffer struct {
@@ -154,8 +162,13 @@ type candidateRequest struct {
 }
 
 type publisherStartRequest struct {
-	Bin  string   `json:"bin"`
-	Args []string `json:"args"`
+	Bin         string   `json:"bin"`
+	Args        []string `json:"args"`
+	TestPattern bool     `json:"test_pattern"`
+	Device      string   `json:"device"`
+	InputFormat string   `json:"input_format"`
+	FPS         int      `json:"fps"`
+	Resolution  string   `json:"resolution"`
 }
 
 type publisherStatusResponse struct {
@@ -207,11 +220,12 @@ func main() {
 	}
 
 	app := &App{
-		cfg:        cfg,
-		api:        api,
-		videoTrack: track,
-		startedAt:  time.Now(),
-		sessions:   map[string]*SessionEntry{},
+		cfg:         cfg,
+		api:         api,
+		videoTrack:  track,
+		startedAt:   time.Now(),
+		sessions:    map[string]*SessionEntry{},
+		rateLimiter: map[string][]int64{},
 	}
 
 	go app.runRTPIngestLoop()
@@ -283,6 +297,14 @@ func loadConfig() Config {
 	cfg.IceUsername = getenv("POC_ICE_USERNAME", "")
 	cfg.IceCredential = getenv("POC_ICE_CREDENTIAL", "")
 	cfg.PublisherStopGraceDuration = 5 * time.Second
+	cfg.AllowRawPublisherArgs = getenvBool("POC_ALLOW_RAW_PUBLISHER_ARGS", false)
+	cfg.OwnerRateLimitPerMinute = getenvInt("POC_OWNER_RATE_LIMIT_PER_MIN", 12)
+	cfg.OfferRateLimitPerMinute = getenvInt("POC_OFFER_RATE_LIMIT_PER_MIN", 10)
+	cfg.StatusRateLimitPerMinute = getenvInt("POC_STATUS_RATE_LIMIT_PER_MIN", 60)
+	cfg.PublisherCooldown = time.Duration(getenvInt("POC_PUBLISHER_COOLDOWN_SECS", 5)) * time.Second
+	if cfg.OwnerToken == "owner-dev-token" && !isLoopbackBind(cfg.BindAddr) {
+		log.Fatalf("unsafe config: POC_OWNER_TOKEN is default while binding to non-loopback address %s", cfg.BindAddr)
+	}
 	return cfg
 }
 
@@ -473,6 +495,10 @@ func (a *App) handleOffer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !a.allowRate(r, "offer", a.cfg.OfferRateLimitPerMinute, time.Minute) {
+		writeError(w, http.StatusTooManyRequests, "offer rate limit exceeded")
+		return
+	}
 
 	if a.sessionCount() >= a.cfg.MaxSessions {
 		writeError(w, http.StatusConflict, fmt.Sprintf("viewer penuh: maksimal %d", a.cfg.MaxSessions))
@@ -631,6 +657,10 @@ func (a *App) handleCameraProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	if !a.ensureOwner(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !a.allowRate(r, "owner-control", a.cfg.OwnerRateLimitPerMinute, time.Minute) {
+		writeError(w, http.StatusTooManyRequests, "owner rate limit exceeded")
 		return
 	}
 
@@ -847,6 +877,10 @@ func (a *App) handlePublisherStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if !a.allowRate(r, "owner-status", a.cfg.StatusRateLimitPerMinute, time.Minute) {
+		writeError(w, http.StatusTooManyRequests, "status rate limit exceeded")
+		return
+	}
 	a.refreshPublisherStateLocked()
 	writeJSON(w, http.StatusOK, a.publisherStatusLocked())
 }
@@ -860,6 +894,10 @@ func (a *App) handlePublisherStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if !a.allowRate(r, "owner-control", a.cfg.OwnerRateLimitPerMinute, time.Minute) {
+		writeError(w, http.StatusTooManyRequests, "owner rate limit exceeded")
+		return
+	}
 
 	var req publisherStartRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -870,10 +908,26 @@ func (a *App) handlePublisherStart(w http.ResponseWriter, r *http.Request) {
 	}
 	args := req.Args
 	if len(args) == 0 {
-		args = a.cfg.PublisherArgs
+		if req.Device != "" || req.InputFormat != "" || req.FPS > 0 || req.Resolution != "" || req.TestPattern {
+			var buildErr error
+			args, buildErr = a.buildStructuredPublisherArgs(req)
+			if buildErr != nil {
+				writeError(w, http.StatusBadRequest, buildErr.Error())
+				return
+			}
+		} else {
+			args = a.cfg.PublisherArgs
+		}
+	} else if !a.cfg.AllowRawPublisherArgs {
+		writeError(w, http.StatusBadRequest, "raw args disabled by server; use structured request")
+		return
 	}
 	if len(args) == 0 {
 		writeError(w, http.StatusBadRequest, "publisher args kosong")
+		return
+	}
+	if !a.allowPublisherCooldown() {
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("publisher cooldown active (%ds)", int(a.cfg.PublisherCooldown/time.Second)))
 		return
 	}
 
@@ -902,6 +956,14 @@ func (a *App) handlePublisherStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if !a.allowRate(r, "owner-control", a.cfg.OwnerRateLimitPerMinute, time.Minute) {
+		writeError(w, http.StatusTooManyRequests, "owner rate limit exceeded")
+		return
+	}
+	if !a.allowPublisherCooldown() {
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("publisher cooldown active (%ds)", int(a.cfg.PublisherCooldown/time.Second)))
+		return
+	}
 	stopped, err := a.stopPublisher("owner request")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -916,6 +978,77 @@ func (a *App) handlePublisherStop(w http.ResponseWriter, r *http.Request) {
 }
 
 var errPublisherAlreadyRunning = errors.New("publisher sudah berjalan")
+
+func isAllowedInputFormat(input string) bool {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "mjpeg", "h264", "yuyv422", "nv12", "nv21", "rgb24", "bgr24":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAllowedResolution(v string) bool {
+	parts := strings.Split(strings.TrimSpace(v), "x")
+	if len(parts) != 2 {
+		return false
+	}
+	w, errW := strconv.Atoi(parts[0])
+	h, errH := strconv.Atoi(parts[1])
+	return errW == nil && errH == nil && w >= 160 && h >= 120 && w <= 3840 && h <= 2160
+}
+
+func (a *App) buildStructuredPublisherArgs(req publisherStartRequest) ([]string, error) {
+	if req.TestPattern {
+		return append([]string{}, a.cfg.PublisherArgs...), nil
+	}
+	device := strings.TrimSpace(req.Device)
+	if !strings.HasPrefix(device, "/dev/video") || device == "" {
+		return nil, fmt.Errorf("invalid device")
+	}
+	if _, err := os.Stat(device); err != nil {
+		return nil, fmt.Errorf("device not found: %s", device)
+	}
+	inputFormat := strings.TrimSpace(req.InputFormat)
+	if !isAllowedInputFormat(inputFormat) {
+		return nil, fmt.Errorf("unsupported input_format")
+	}
+	fps := req.FPS
+	if fps <= 0 {
+		fps = 10
+	}
+	if fps > 60 {
+		return nil, fmt.Errorf("fps must be 1..60")
+	}
+	resolution := strings.TrimSpace(req.Resolution)
+	if resolution == "" {
+		resolution = "640x360"
+	}
+	if !isAllowedResolution(resolution) {
+		return nil, fmt.Errorf("invalid resolution")
+	}
+
+	args := []string{"-f", "v4l2", "-input_format", inputFormat, "-framerate", strconv.Itoa(fps), "-video_size", resolution, "-i", device, "-an"}
+	if strings.EqualFold(inputFormat, "h264") {
+		args = append(args, "-c:v", "copy")
+	} else {
+		args = append(args, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-level", "3.1", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0")
+	}
+	args = append(args, "-f", "rtp", "rtp://"+a.cfg.RTPListenAddr)
+	return args, nil
+}
+
+func (a *App) allowPublisherCooldown() bool {
+	if a.cfg.PublisherCooldown <= 0 {
+		return true
+	}
+	a.publisherMu.Lock()
+	defer a.publisherMu.Unlock()
+	if a.publisher.LastChangeUnix == 0 {
+		return true
+	}
+	return time.Since(time.Unix(a.publisher.LastChangeUnix, 0)) >= a.cfg.PublisherCooldown
+}
 
 func (a *App) startPublisher(bin string, args []string) (bool, error) {
 	a.publisherMu.Lock()
@@ -947,6 +1080,7 @@ func (a *App) startPublisher(bin string, args []string) (bool, error) {
 		stderr:      stderr,
 	}
 	a.publisher.Running = proc
+	a.publisher.LastChangeUnix = time.Now().Unix()
 
 	go func(p *PublisherProcess) {
 		err := p.cmd.Wait()
@@ -1001,6 +1135,7 @@ func (a *App) stopPublisher(reason string) (bool, error) {
 	exit := publisherExitFromWait(waitErr, proc.stderr.String())
 	a.publisherMu.Lock()
 	a.publisher.LastExit = exit
+	a.publisher.LastChangeUnix = time.Now().Unix()
 	a.publisherMu.Unlock()
 	log.Printf("publisher stopped pid=%d reason=%s", proc.pid, reason)
 	return true, nil
@@ -1126,8 +1261,56 @@ func (a *App) touchSession(sessionID string) {
 }
 
 func (a *App) ensureOwner(r *http.Request) bool {
-	token := r.URL.Query().Get("token")
+	token := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(token, "Bearer ") {
+		token = strings.TrimSpace(strings.TrimPrefix(token, "Bearer "))
+	} else {
+		token = strings.TrimSpace(r.URL.Query().Get("token"))
+	}
 	return token != "" && token == a.cfg.OwnerToken
+}
+
+func clientKey(r *http.Request) string {
+	if xf := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xf != "" {
+		return strings.TrimSpace(strings.Split(xf, ",")[0])
+	}
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		return xr
+	}
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
+	}
+	if host == "" {
+		return "unknown"
+	}
+	return host
+}
+
+func (a *App) allowRate(r *http.Request, bucket string, limit int, window time.Duration) bool {
+	if limit <= 0 {
+		return true
+	}
+	key := bucket + ":" + clientKey(r)
+	now := time.Now().Unix()
+	cutoff := now - int64(window.Seconds())
+
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+	history := a.rateLimiter[key]
+	dst := history[:0]
+	for _, ts := range history {
+		if ts >= cutoff {
+			dst = append(dst, ts)
+		}
+	}
+	if len(dst) >= limit {
+		a.rateLimiter[key] = dst
+		return false
+	}
+	dst = append(dst, now)
+	a.rateLimiter[key] = dst
+	return true
 }
 
 func (a *App) publisherRunning() bool {
@@ -1241,6 +1424,20 @@ func strPtrOrNil(v string) *string {
 		return nil
 	}
 	return &v
+}
+
+func isLoopbackBind(addr string) bool {
+	host := addr
+	if strings.Contains(addr, ":") {
+		if h, _, err := net.SplitHostPort(addr); err == nil {
+			host = h
+		}
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return host == "localhost"
+	}
+	return ip.IsLoopback()
 }
 
 const indexHTML = `<!doctype html>
@@ -1382,6 +1579,7 @@ const indexHTML = `<!doctype html>
     <script>
       let pc = null;
       let sessionId = null;
+      const pendingCandidates = [];
       let iceServers = ["stun:stun.l.google.com:19302"];
       let rtpListenAddr = "127.0.0.1:6004";
       let probedCameras = [];
@@ -1482,10 +1680,13 @@ const indexHTML = `<!doctype html>
       async function publisherRequest(path, method = "GET", body = null) {
         const token = ownerToken();
         if (!token) throw new Error("owner token belum diisi");
-        const url = path + "?token=" + encodeURIComponent(token);
+        const url = path;
         const resp = await fetch(url, {
           method,
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + token,
+          },
           body: body ? JSON.stringify(body) : null,
         });
         const data = await resp.json().catch(() => ({}));
@@ -1518,8 +1719,35 @@ const indexHTML = `<!doctype html>
           elState.textContent = pc.connectionState;
           log("pc state = " + pc.connectionState);
         };
+        async function flushPendingCandidates() {
+          if (!sessionId) return;
+          while (pendingCandidates.length > 0) {
+            const c = pendingCandidates.shift();
+            if (!c) continue;
+            try {
+              await fetch("/webrtc/candidate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  session_id: sessionId,
+                  candidate: c.candidate,
+                  sdpMid: c.sdpMid,
+                  sdpMLineIndex: c.sdpMLineIndex,
+                  usernameFragment: c.usernameFragment,
+                }),
+              });
+            } catch (err) {
+              log("candidate post error: " + err);
+            }
+          }
+        }
+
         pc.onicecandidate = async (ev) => {
-          if (!ev.candidate || !sessionId) return;
+          if (!ev.candidate) return;
+          if (!sessionId) {
+            pendingCandidates.push(ev.candidate);
+            return;
+          }
           try {
             await fetch("/webrtc/candidate", {
               method: "POST",
@@ -1554,6 +1782,7 @@ const indexHTML = `<!doctype html>
         sessionId = data.session_id;
         elSession.textContent = sessionId;
         await pc.setRemoteDescription({ type: data.type, sdp: data.sdp });
+        await flushPendingCandidates();
         log("connected with session " + sessionId);
       }
 
@@ -1624,33 +1853,13 @@ const indexHTML = `<!doctype html>
           const fps = elCameraFPS.value.trim();
           const resolution = elCameraResolution.value.trim();
 
-          const args = ["-f", "v4l2"];
-          if (inputFormat) {
-            args.push("-input_format", inputFormat);
-          }
-          if (fps) {
-            args.push("-framerate", fps);
-          }
-          if (resolution) {
-            args.push("-video_size", resolution);
-          }
-          args.push(
-            "-i", device,
-            "-an",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "baseline",
-            "-level", "3.1",
-            "-g", "30",
-            "-keyint_min", "30",
-            "-sc_threshold", "0",
-            "-f", "rtp",
-            "rtp://" + rtpListenAddr
-          );
-
-          const data = await publisherRequest("/publisher/start", "POST", { args });
+          const data = await publisherRequest("/publisher/start", "POST", {
+            test_pattern: false,
+            device,
+            input_format: inputFormat || "mjpeg",
+            fps: fps ? Number(fps) : 10,
+            resolution: resolution || "640x360"
+          });
           renderPublisherStatus(data);
           log("webcam publisher started: " + device + " -> rtp://" + rtpListenAddr);
         } catch (err) {

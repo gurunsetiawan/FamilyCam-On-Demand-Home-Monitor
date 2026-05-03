@@ -15,7 +15,7 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let app_name = env::var("APP_NAME").unwrap_or_else(|_| "FamilyCam".to_owned());
-        let bind_addr = env::var("BIND_ADDR")
+        let bind_addr: SocketAddr = env::var("BIND_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
             .parse()?;
         let auto_shutdown_seconds = env::var("AUTO_SHUTDOWN_SECONDS")
@@ -33,6 +33,13 @@ impl AppConfig {
         let telegram_chat_id = env::var("TELEGRAM_CHAT_ID")
             .ok()
             .filter(|value| !value.trim().is_empty());
+
+        if app_password == "change-me" && !bind_addr.ip().is_loopback() {
+            anyhow::bail!(
+                "unsafe config: APP_PASSWORD is default while binding to non-loopback address {}",
+                bind_addr
+            );
+        }
 
         Ok(Self {
             app_name,

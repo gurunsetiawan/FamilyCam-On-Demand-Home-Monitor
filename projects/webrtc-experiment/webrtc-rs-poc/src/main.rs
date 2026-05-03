@@ -10,6 +10,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
@@ -63,11 +64,16 @@ struct AppConfig {
     video_fmtp_line: String,
     publisher_bin: String,
     publisher_args: Vec<String>,
+    allow_raw_publisher_args: bool,
+    owner_rate_limit_per_minute: u32,
+    offer_rate_limit_per_minute: u32,
+    status_rate_limit_per_minute: u32,
+    publisher_cooldown_secs: u64,
 }
 
 impl AppConfig {
     fn from_env() -> Result<Self> {
-        let bind_addr = env::var("POC_BIND_ADDR")
+        let bind_addr: SocketAddr = env::var("POC_BIND_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:9080".to_string())
             .parse()
             .context("invalid POC_BIND_ADDR")?;
@@ -137,6 +143,30 @@ impl AppConfig {
             .split_whitespace()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
+        let allow_raw_publisher_args = parse_env_bool("POC_ALLOW_RAW_PUBLISHER_ARGS", false);
+        let owner_rate_limit_per_minute = env::var("POC_OWNER_RATE_LIMIT_PER_MIN")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(12);
+        let offer_rate_limit_per_minute = env::var("POC_OFFER_RATE_LIMIT_PER_MIN")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(10);
+        let status_rate_limit_per_minute = env::var("POC_STATUS_RATE_LIMIT_PER_MIN")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(60);
+        let publisher_cooldown_secs = env::var("POC_PUBLISHER_COOLDOWN_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+
+        if owner_token == "owner-dev-token" && !bind_addr.ip().is_loopback() {
+            return Err(anyhow!(
+                "unsafe config: POC_OWNER_TOKEN is default while binding to non-loopback address {}",
+                bind_addr
+            ));
+        }
 
         Ok(Self {
             bind_addr,
@@ -156,6 +186,11 @@ impl AppConfig {
             video_fmtp_line,
             publisher_bin,
             publisher_args,
+            allow_raw_publisher_args,
+            owner_rate_limit_per_minute,
+            offer_rate_limit_per_minute,
+            status_rate_limit_per_minute,
+            publisher_cooldown_secs,
         })
     }
 }
@@ -170,6 +205,7 @@ struct AppState {
     sessions: Arc<RwLock<HashMap<Uuid, SessionEntry>>>,
     ingest_stats: Arc<Mutex<IngestStats>>,
     publisher: Arc<Mutex<PublisherState>>,
+    rate_limiter: Arc<Mutex<RateLimiter>>,
 }
 
 struct SessionEntry {
@@ -191,6 +227,7 @@ struct IngestStats {
 struct PublisherState {
     running: Option<PublisherProcess>,
     last_exit: Option<PublisherExitInfo>,
+    last_change_unix: u64,
 }
 
 impl Default for PublisherState {
@@ -198,7 +235,41 @@ impl Default for PublisherState {
         Self {
             running: None,
             last_exit: None,
+            last_change_unix: 0,
         }
+    }
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self {
+            buckets: HashMap::new(),
+        }
+    }
+}
+
+impl RateLimiter {
+    fn allow(&mut self, key: String, bucket: RateBucket, limit: u32, window_secs: u64) -> bool {
+        if limit == 0 {
+            return true;
+        }
+        let now = now_unix();
+        let entry = self
+            .buckets
+            .entry((key, bucket))
+            .or_insert_with(VecDeque::new);
+        while let Some(front) = entry.front() {
+            if now.saturating_sub(*front) >= window_secs {
+                entry.pop_front();
+            } else {
+                break;
+            }
+        }
+        if entry.len() as u32 >= limit {
+            return false;
+        }
+        entry.push_back(now);
+        true
     }
 }
 
@@ -282,7 +353,18 @@ struct CandidateRequest {
 
 #[derive(Deserialize)]
 struct OwnerQuery {
-    token: String,
+    token: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum RateBucket {
+    Offer,
+    OwnerControl,
+    Status,
+}
+
+struct RateLimiter {
+    buckets: HashMap<(String, RateBucket), VecDeque<u64>>,
 }
 
 #[derive(Serialize)]
@@ -296,6 +378,11 @@ struct SessionsResponse {
 struct PublisherStartRequest {
     bin: Option<String>,
     args: Option<Vec<String>>,
+    test_pattern: Option<bool>,
+    device: Option<String>,
+    input_format: Option<String>,
+    fps: Option<u32>,
+    resolution: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -354,6 +441,7 @@ async fn main() -> Result<()> {
         sessions: Arc::new(RwLock::new(HashMap::new())),
         ingest_stats: Arc::new(Mutex::new(IngestStats::default())),
         publisher: Arc::new(Mutex::new(PublisherState::default())),
+        rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
     };
     spawn_cleanup_task(state.clone());
     spawn_rtp_ingest_task(state.clone());
@@ -407,11 +495,100 @@ fn build_webrtc_api(config: &AppConfig) -> Result<webrtc::api::API> {
         .build())
 }
 
-fn ensure_owner(state: &AppState, token: &str) -> Result<(), ApiError> {
-    if token == state.config.owner_token {
+fn owner_token_from_headers_or_query(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Option<String> {
+    if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(rest) = auth.strip_prefix("Bearer ") {
+            let token = rest.trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    query_token
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+}
+
+async fn ensure_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    bucket: RateBucket,
+) -> Result<(), ApiError> {
+    let token =
+        owner_token_from_headers_or_query(headers, query_token).ok_or(ApiError::Unauthorized)?;
+    if token != state.config.owner_token {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let rate_limit = match bucket {
+        RateBucket::Status => state.config.status_rate_limit_per_minute,
+        RateBucket::OwnerControl => state.config.owner_rate_limit_per_minute,
+        RateBucket::Offer => state.config.offer_rate_limit_per_minute,
+    };
+    let client_key = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut limiter = state.rate_limiter.lock().await;
+    if !limiter.allow(client_key, bucket, rate_limit, 60) {
+        return Err(ApiError::Conflict("rate limit exceeded".to_string()));
+    }
+    Ok(())
+}
+
+async fn ensure_offer_rate_limit(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let client_key = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut limiter = state.rate_limiter.lock().await;
+    if !limiter.allow(
+        client_key,
+        RateBucket::Offer,
+        state.config.offer_rate_limit_per_minute,
+        60,
+    ) {
+        return Err(ApiError::Conflict("offer rate limit exceeded".to_string()));
+    }
+    Ok(())
+}
+
+fn ensure_publisher_cooldown(state: &AppState, publisher: &PublisherState) -> Result<(), ApiError> {
+    if state.config.publisher_cooldown_secs == 0 {
         Ok(())
+    } else if publisher.last_change_unix > 0
+        && now_unix().saturating_sub(publisher.last_change_unix)
+            < state.config.publisher_cooldown_secs
+    {
+        Err(ApiError::Conflict(format!(
+            "publisher cooldown active ({}s)",
+            state.config.publisher_cooldown_secs
+        )))
     } else {
-        Err(ApiError::Unauthorized)
+        Ok(())
     }
 }
 
@@ -528,9 +705,10 @@ fn publisher_status_response(state: &PublisherState) -> PublisherStatusResponse 
 
 async fn publisher_status(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<OwnerQuery>,
 ) -> Result<Json<PublisherStatusResponse>, ApiError> {
-    ensure_owner(&state, &query.token)?;
+    ensure_owner(&state, &headers, query.token.as_deref(), RateBucket::Status).await?;
     let mut publisher = state.publisher.lock().await;
     refresh_publisher_state_locked(&mut publisher);
     Ok(Json(publisher_status_response(&publisher)))
@@ -538,24 +716,48 @@ async fn publisher_status(
 
 async fn publisher_start(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<OwnerQuery>,
     req: Option<Json<PublisherStartRequest>>,
 ) -> Result<Json<PublisherStatusResponse>, ApiError> {
-    ensure_owner(&state, &query.token)?;
+    ensure_owner(
+        &state,
+        &headers,
+        query.token.as_deref(),
+        RateBucket::OwnerControl,
+    )
+    .await?;
     let req = req.map(|v| v.0).unwrap_or_default();
 
     let mut publisher = state.publisher.lock().await;
     refresh_publisher_state_locked(&mut publisher);
+    ensure_publisher_cooldown(&state, &publisher)?;
     if publisher.running.is_some() {
         return Err(ApiError::Conflict("publisher sudah berjalan".to_string()));
     }
 
     let bin = req
         .bin
+        .clone()
         .unwrap_or_else(|| state.config.publisher_bin.clone());
-    let args = req
-        .args
-        .unwrap_or_else(|| state.config.publisher_args.clone());
+    let args = if let Some(args) = req.args.clone() {
+        if state.config.allow_raw_publisher_args {
+            args
+        } else {
+            return Err(ApiError::BadRequest(
+                "raw args disabled by server; use structured request".to_string(),
+            ));
+        }
+    } else if req.device.is_some()
+        || req.input_format.is_some()
+        || req.fps.is_some()
+        || req.resolution.is_some()
+        || req.test_pattern.is_some()
+    {
+        build_structured_publisher_args(&req, &state)?
+    } else {
+        state.config.publisher_args.clone()
+    };
     if args.is_empty() {
         return Err(ApiError::BadRequest(
             "publisher args kosong, isi POC_PUBLISHER_ARGS atau body args".to_string(),
@@ -594,6 +796,7 @@ async fn publisher_start(
             publisher_exit_summary(exit.as_ref())
         )));
     }
+    publisher.last_change_unix = now_unix();
     info!("publisher started pid={pid:?} cmd={} args={:?}", bin, args);
 
     Ok(Json(publisher_status_response(&publisher)))
@@ -601,9 +804,16 @@ async fn publisher_start(
 
 async fn publisher_stop(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<OwnerQuery>,
 ) -> Result<Json<PublisherStatusResponse>, ApiError> {
-    ensure_owner(&state, &query.token)?;
+    ensure_owner(
+        &state,
+        &headers,
+        query.token.as_deref(),
+        RateBucket::OwnerControl,
+    )
+    .await?;
     if !stop_publisher_process(&state, "owner request").await? {
         return Err(ApiError::Conflict(
             "publisher tidak sedang berjalan".to_string(),
@@ -617,9 +827,16 @@ async fn publisher_stop(
 
 async fn camera_probe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<OwnerQuery>,
 ) -> Result<Json<CameraProbeResponse>, ApiError> {
-    ensure_owner(&state, &query.token)?;
+    ensure_owner(
+        &state,
+        &headers,
+        query.token.as_deref(),
+        RateBucket::OwnerControl,
+    )
+    .await?;
     let cameras = probe_cameras().await?;
     Ok(Json(CameraProbeResponse {
         count: cameras.len(),
@@ -795,8 +1012,10 @@ async fn metrics(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 async fn webrtc_offer(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<OfferRequest>,
 ) -> Result<Json<OfferResponse>, ApiError> {
+    ensure_offer_rate_limit(&state, &headers).await?;
     let session_id = Uuid::new_v4();
     let rtc_config = if state.config.ice_servers.is_empty() {
         RTCConfiguration::default()
@@ -905,9 +1124,10 @@ async fn webrtc_candidate(
 
 async fn webrtc_sessions(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<OwnerQuery>,
 ) -> Result<Json<SessionsResponse>, ApiError> {
-    ensure_owner(&state, &query.token)?;
+    ensure_owner(&state, &headers, query.token.as_deref(), RateBucket::Status).await?;
 
     let sessions = {
         let guard = state.sessions.read().await;
@@ -929,10 +1149,17 @@ async fn webrtc_sessions(
 
 async fn webrtc_close_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     axum::extract::Query(query): axum::extract::Query<OwnerQuery>,
 ) -> Result<StatusCode, ApiError> {
-    ensure_owner(&state, &query.token)?;
+    ensure_owner(
+        &state,
+        &headers,
+        query.token.as_deref(),
+        RateBucket::OwnerControl,
+    )
+    .await?;
 
     let removed = remove_session(&state, id).await;
     match removed {
@@ -1207,6 +1434,7 @@ async fn stop_publisher_process(state: &AppState, reason: &str) -> Result<bool, 
 
     let mut publisher = state.publisher.lock().await;
     publisher.last_exit = Some(exit_info);
+    publisher.last_change_unix = now_unix();
     refresh_publisher_state_locked(&mut publisher);
     info!("publisher stopped pid={pid:?} reason={reason}");
     Ok(true)
@@ -1286,6 +1514,127 @@ fn parse_env_bool(key: &str, default: bool) -> bool {
         }
         Err(_) => default,
     }
+}
+
+fn is_safe_video_device(device: &str) -> bool {
+    if !device.starts_with("/dev/video") {
+        return false;
+    }
+    std::path::Path::new(device).exists()
+}
+
+fn is_allowed_input_format(input: &str) -> bool {
+    matches!(
+        input.to_ascii_lowercase().as_str(),
+        "mjpeg" | "h264" | "yuyv422" | "nv12" | "nv21" | "rgb24" | "bgr24"
+    )
+}
+
+fn is_allowed_resolution(resolution: &str) -> bool {
+    let mut parts = resolution.split('x');
+    let w = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let h = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    parts.next().is_none() && w >= 160 && h >= 120 && w <= 3840 && h <= 2160
+}
+
+fn build_structured_publisher_args(
+    req: &PublisherStartRequest,
+    state: &AppState,
+) -> Result<Vec<String>, ApiError> {
+    if req.test_pattern.unwrap_or(false) {
+        return Ok(state.config.publisher_args.clone());
+    }
+    let device = req
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("device is required".to_string()))?;
+    if !is_safe_video_device(device) {
+        return Err(ApiError::BadRequest(
+            "invalid or missing /dev/video device".to_string(),
+        ));
+    }
+    let input_format = req
+        .input_format
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("input_format is required".to_string()))?;
+    if !is_allowed_input_format(input_format) {
+        return Err(ApiError::BadRequest("unsupported input_format".to_string()));
+    }
+    let fps = req.fps.unwrap_or(10);
+    if !(1..=60).contains(&fps) {
+        return Err(ApiError::BadRequest(
+            "fps must be between 1 and 60".to_string(),
+        ));
+    }
+    let resolution = req
+        .resolution
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("640x360");
+    if !is_allowed_resolution(resolution) {
+        return Err(ApiError::BadRequest(
+            "invalid resolution format".to_string(),
+        ));
+    }
+
+    let mut args = vec![
+        "-f".to_string(),
+        "v4l2".to_string(),
+        "-input_format".to_string(),
+        input_format.to_string(),
+        "-framerate".to_string(),
+        fps.to_string(),
+        "-video_size".to_string(),
+        resolution.to_string(),
+        "-i".to_string(),
+        device.to_string(),
+        "-an".to_string(),
+    ];
+    if input_format.eq_ignore_ascii_case("h264") {
+        args.extend(["-c:v", "copy"].iter().map(|v| v.to_string()));
+    } else {
+        args.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-pix_fmt",
+                "yuv420p",
+                "-profile:v",
+                "baseline",
+                "-level",
+                "3.1",
+                "-g",
+                "30",
+                "-keyint_min",
+                "30",
+                "-sc_threshold",
+                "0",
+            ]
+            .iter()
+            .map(|v| v.to_string()),
+        );
+    }
+    args.extend([
+        "-f".to_string(),
+        "rtp".to_string(),
+        format!("rtp://{}", state.config.rtp_listen_addr),
+    ]);
+    Ok(args)
 }
 
 const INDEX_HTML: &str = r#"<!doctype html>
@@ -1491,6 +1840,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const STORAGE_KEY = "familycam_webrtc_poc_ui_v1";
       let pc = null;
       let sessionId = null;
+      const pendingCandidates = [];
       let publisherPollInFlight = false;
       let healthPollInFlight = false;
       let lastPublisherSummary = "";
@@ -1590,10 +1940,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
         if (!token) {
           throw new Error("owner token belum diisi");
         }
-        const url = `${path}?token=${encodeURIComponent(token)}`;
+        const url = path;
         const resp = await fetch(url, {
           method,
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+          },
           body: body ? JSON.stringify(body) : null,
         });
         const data = await resp.json().catch(() => ({}));
@@ -1743,33 +2096,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
           const size = elCameraSize.value.trim();
           saveUiPreferences();
 
-          const args = ["-f", "v4l2"];
-          const ffFormat = toFfmpegInputFormat(format);
-          if (ffFormat) args.push("-input_format", ffFormat);
-          if (fps) args.push("-framerate", fps);
-          if (size) args.push("-video_size", size);
-          args.push("-i", device, "-an");
-
-          const formatCode = (format || "").toUpperCase();
-          const canCopy = formatCode === "H264";
-          if (canCopy) {
-            args.push("-c:v", "copy");
-          } else {
-            args.push(
-              "-c:v", "libx264",
-              "-preset", "ultrafast",
-              "-tune", "zerolatency",
-              "-pix_fmt", "yuv420p",
-              "-profile:v", "baseline",
-              "-level", "3.1",
-              "-g", "30",
-              "-keyint_min", "30",
-              "-sc_threshold", "0"
-            );
-          }
-          args.push("-f", "rtp", `rtp://${uiState.rtpListen}`);
-
-          const data = await publisherRequest("/publisher/start", "POST", { bin: "ffmpeg", args });
+          const ffFormat = toFfmpegInputFormat(format) || "mjpeg";
+          const fpsNumber = fps ? Number(fps) : 10;
+          const data = await publisherRequest("/publisher/start", "POST", {
+            test_pattern: false,
+            device,
+            input_format: ffFormat,
+            fps: Number.isFinite(fpsNumber) ? fpsNumber : 10,
+            resolution: size || "640x360",
+          });
           const summary = renderPublisherStatus(data);
           lastPublisherSummary = summary;
           log(`webcam publisher started ${device} -> ${uiState.rtpListen}`);
@@ -1815,8 +2150,35 @@ const INDEX_HTML: &str = r#"<!doctype html>
           elState.textContent = pc.connectionState;
           log(`pc state = ${pc.connectionState}`);
         };
+        async function flushPendingCandidates() {
+          if (!sessionId) return;
+          while (pendingCandidates.length > 0) {
+            const candidate = pendingCandidates.shift();
+            if (!candidate) continue;
+            try {
+              await fetch("/webrtc/candidate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  session_id: sessionId,
+                  candidate: candidate.candidate,
+                  sdpMid: candidate.sdpMid,
+                  sdpMLineIndex: candidate.sdpMLineIndex,
+                  usernameFragment: candidate.usernameFragment,
+                }),
+              });
+            } catch (err) {
+              log(`candidate post error: ${err}`);
+            }
+          }
+        }
+
         pc.onicecandidate = async (ev) => {
-          if (!ev.candidate || !sessionId) return;
+          if (!ev.candidate) return;
+          if (!sessionId) {
+            pendingCandidates.push(ev.candidate);
+            return;
+          }
           try {
             await fetch("/webrtc/candidate", {
               method: "POST",
@@ -1850,6 +2212,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         sessionId = data.session_id;
         elSession.textContent = sessionId;
         await pc.setRemoteDescription({ type: data.type, sdp: data.sdp });
+        await flushPendingCandidates();
         log(`connected with session ${sessionId}`);
       }
 
