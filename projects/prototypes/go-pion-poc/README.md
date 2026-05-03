@@ -1,6 +1,6 @@
-# FamilyCam Go + Pion PoC
+# FamilyCam Go + Pion (Beta)
 
-Prototype pembanding untuk `projects/webrtc-experiment/webrtc-rs-poc`.
+Komponen Beta pembanding untuk `projects/webrtc-experiment/webrtc-rs-poc`.
 
 Tujuan:
 - bandingkan stabilitas koneksi
@@ -36,11 +36,15 @@ http://127.0.0.1:9180
 - `GET /metrics`
 - `POST /webrtc/offer`
 - `POST /webrtc/candidate`
-- `GET /webrtc/sessions?token=...` (owner)
-- `GET /camera/probe?token=...` (owner)
-- `GET /publisher/status?token=...` (owner)
-- `POST /publisher/start?token=...` (owner)
-- `POST /publisher/stop?token=...` (owner)
+- `GET /webrtc/sessions` (owner)
+- `GET /camera/probe` (owner)
+- `GET /publisher/status` (owner)
+- `POST /publisher/start` (owner)
+- `POST /publisher/stop` (owner)
+
+Owner auth:
+- Header utama: `Authorization: Bearer <token>`
+- Query `?token=` masih fallback kompatibilitas
 
 ## Test Webcam dari UI
 1. Isi `Owner Token`.

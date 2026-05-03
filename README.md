@@ -1,6 +1,6 @@
 # FamilyCam (On-Demand Home Monitor) Workspace
 
-Repo ini dipisah menjadi jalur stabil (`main-app`) dan jalur eksperimen (`webrtc-experiment`) supaya keduanya bisa berkembang tanpa saling merusak.
+Repo ini dipisah menjadi jalur stabil (`main-app`) dan jalur beta (`webrtc-experiment` + `prototypes`) supaya keduanya bisa berkembang tanpa saling merusak.
 
 ## Kenapa Proyek Ini Dibuat
 Saya membuat aplikasi ini untuk memanfaatkan barang/perangkat yang sudah ada di rumah untuk kebutuhan sendiri, khususnya monitoring keluarga secara sederhana, hemat biaya, dan tetap privat.
@@ -50,15 +50,15 @@ cd /home/iwan/Project/family-cam-on-demand-home-monitor
 scripts/check-camera.sh
 ```
 
-## 2) WebRTC Experiment (PoC)
+## 2) WebRTC Rust (Beta)
 Lokasi:
 - `projects/webrtc-experiment`
 
 Isi:
-- `webrtc-rs-poc` (aplikasi runnable)
-- dokumentasi publik terkait eksperimen
+- `webrtc-rs-poc` (status: Beta)
+- dokumentasi publik terkait implementasi WebRTC
 
-Status terbaru PoC:
+Status terbaru:
 - signaling WebRTC (`offer/candidate`)
 - RTP ingest UDP ke `TrackLocalStaticRTP`
 - helper publisher ffmpeg (`start/stop/status`)
@@ -72,12 +72,13 @@ cd projects/webrtc-experiment/webrtc-rs-poc
 cargo run
 ```
 
-## 3) Prototype Comparisons
+## 3) WebRTC Go + Android (Beta)
 Lokasi:
 - `projects/prototypes`
 
 Isi:
-- `go-pion-poc` (Go + Pion) sebagai pembanding langsung jalur `webrtc-rs-poc`.
+- `go-pion-poc` (status: Beta)
+- `kotlin-android-viewer` (status: Beta)
 
 Jalankan:
 ```bash

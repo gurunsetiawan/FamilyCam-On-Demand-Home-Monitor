@@ -1,11 +1,12 @@
-# Kotlin Android Viewer
+# Kotlin Android Viewer (Beta)
 
-Prototype Android native viewer/control untuk backend FamilyCam (Go/Rust).
+Android native viewer/control untuk backend FamilyCam (Go/Rust), status **Beta**.
 
 Status saat ini:
 - Riset library selesai di [LIBRARY_RESEARCH.md](/home/iwan/Project/family-cam-on-demand-home-monitor/projects/prototypes/kotlin-android-viewer/LIBRARY_RESEARCH.md)
 - Integrasi owner control endpoint sudah aktif (`probe`, `publisher status/start/stop`)
 - Integrasi WebRTC native dasar sudah aktif (`connect/disconnect` + video renderer)
+- Owner auth dikirim via `Authorization: Bearer <token>`
 
 ## Pilihan stack yang dikunci
 - WebRTC: `io.github.webrtc-sdk:android:137.7151.05`

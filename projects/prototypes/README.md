@@ -1,13 +1,13 @@
-# Prototypes
+# Beta Components
 
-Folder ini berisi prototype pembanding untuk evaluasi arsitektur streaming.
+Folder ini berisi komponen **Beta** untuk evaluasi dan rollout bertahap arsitektur WebRTC.
 
 ## Daftar
 - `go-pion-poc/`
-  - Prototype WebRTC menggunakan Go + Pion.
+  - WebRTC menggunakan Go + Pion (status: Beta).
   - Tujuan: pembanding langsung terhadap `projects/webrtc-experiment/webrtc-rs-poc`.
 - `kotlin-android-viewer/`
-  - Prototype Android native viewer/control (owner API + WebRTC basic sudah terpasang).
+  - Android native viewer/control (status: Beta).
   - Dokumen utama: `kotlin-android-viewer/LIBRARY_RESEARCH.md`.
 
 ## Script Pendukung

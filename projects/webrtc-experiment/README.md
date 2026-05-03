@@ -1,14 +1,14 @@
-# WebRTC Experiment
+# WebRTC Rust (Beta)
 
-Folder ini berisi prototype eksperimen WebRTC untuk FamilyCam.
+Folder ini berisi implementasi WebRTC Rust FamilyCam dengan status **Beta**.
 
 ## Isi Folder
 - `webrtc-rs-poc/`
-  - aplikasi PoC WebRTC berbasis `webrtc-rs` (jalur eksperimen terpisah).
+  - aplikasi WebRTC berbasis `webrtc-rs` (status: Beta).
 
 - Dokumentasi runnable untuk publik ada di `webrtc-rs-poc/README.md`.
 
-## Status PoC Saat Ini
+## Status Beta Saat Ini
 `webrtc-rs-poc` sudah punya:
 - signaling dasar (`offer/candidate`)
 - RTP ingest dari ffmpeg ke WebRTC track
@@ -19,6 +19,10 @@ Folder ini berisi prototype eksperimen WebRTC untuk FamilyCam.
 - runtime metrics endpoint (`/metrics`)
 - UI dashboard 2 kolom + auto refresh status
 - simpan setting UI di browser (`localStorage`) + clear button
+- owner auth via `Authorization: Bearer <token>` (query token masih fallback kompatibilitas)
+- in-memory rate limiting (`offer`, `owner control`, `status`)
+- publisher start/stop cooldown
+- structured publisher request untuk mode webcam
 
 Quick run:
 ```bash
